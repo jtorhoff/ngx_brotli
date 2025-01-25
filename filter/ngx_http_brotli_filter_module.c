@@ -266,13 +266,6 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
     return ngx_http_next_header_filter(r);
   }
 
-  /* Only compress OK / forbidden / not found responses. */
-  if (r->headers_out.status != NGX_HTTP_OK &&
-      r->headers_out.status != NGX_HTTP_FORBIDDEN &&
-      r->headers_out.status != NGX_HTTP_NOT_FOUND) {
-    return ngx_http_next_header_filter(r);
-  }
-
   /* Bypass "header only" responses. */
   if (r->header_only) {
     return ngx_http_next_header_filter(r);
