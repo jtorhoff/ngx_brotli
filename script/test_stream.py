@@ -653,6 +653,54 @@ def test_head(ctx):
 # ---------------------------------------------------------------------------
 
 
+@test("buffered stream shrinks the window once the size is known", needs_debug=True)
+def test_deferred_window_for_buffered_stream(ctx):
+    """A small response of unknown length still reaches the filter whole, just
+    without last_buf on the first call. Holding it briefly lets the filter size
+    the window from the real total instead of falling back to brotli_window."""
+    ctx.nginx.truncate_log()
+    fetch(ctx.port, "/buffered/small.html")
+    windows = encoder_windows(ctx.nginx.read_log())
+
+    check(len(windows) == 1, f"expected one encoder, saw {windows!r}")
+    check(
+        windows[0] < FULL_WINDOW,
+        f"a small buffered stream should size its window from the response, "
+        f"got the full {windows[0]}; the encoder was created before the whole "
+        f"body arrived",
+    )
+
+
+@test("buffered stream still round-trips", needs_decoder=True)
+def test_buffered_stream_roundtrip(ctx):
+    status, headers, body = fetch(ctx.port, "/buffered/big.html")
+    check(status == 200, f"expected 200, got {status}")
+    check(
+        headers.get("content-encoding") == "br",
+        f"expected Content-Encoding: br, got {headers.get('content-encoding')!r}",
+    )
+    check(
+        ctx.decode(body) == ctx.fixtures["big.html"],
+        "decoded buffered stream differs from the original",
+    )
+
+
+@test("large buffered stream still uses the full window", needs_debug=True)
+def test_deferred_falls_back_for_large(ctx):
+    """Deferral must give up once enough input has accumulated: the response
+    may be huge, and a window sized from a partial prefix would cost ratio."""
+    ctx.nginx.truncate_log()
+    fetch(ctx.port, "/buffered/big.html")
+    windows = encoder_windows(ctx.nginx.read_log())
+
+    check(len(windows) == 1, f"expected one encoder, saw {windows!r}")
+    check(
+        windows[0] == FULL_WINDOW,
+        f"a large stream must fall back to the full {FULL_WINDOW} window, got "
+        f"{windows[0]} - a window sized from a prefix would hurt compression",
+    )
+
+
 @test("known Content-Length shrinks the encoder window", needs_debug=True)
 def test_window_tuning(ctx):
     ctx.nginx.truncate_log()

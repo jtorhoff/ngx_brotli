@@ -20,6 +20,11 @@
    IIUC, buffered == some data passed to filter has not been pushed further. */
 #define NGX_HTTP_BROTLI_BUFFERED NGX_HTTP_GZIP_BUFFERED
 
+/* How much input may be held back while waiting to learn the response size.
+   Matches Brotli's own input block size: the encoder would have buffered this
+   much internally without emitting anything, so the wait is not observable. */
+#define NGX_HTTP_BROTLI_DEFER_INPUT (64 * 1024)
+
 /* Module configuration. */
 typedef struct {
   ngx_flag_t enable;
@@ -92,6 +97,13 @@ static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
     ngx_http_request_t* r, ngx_http_brotli_ctx_t* ctx);
 /* Marks instance as closed and performs cleanup. */
 static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx);
+
+/* Totals the unconsumed input, reporting whether the chain closes the
+   response ("complete") and whether anything in it demands to be pushed out
+   now ("urgent"). */
+static size_t ngx_http_brotli_filter_pending_input(ngx_chain_t* in,
+                                                   ngx_uint_t* complete,
+                                                   ngx_uint_t* urgent);
 
 static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size);
 static void ngx_http_brotli_filter_free(void* opaque, void* address);
@@ -355,11 +367,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     return ngx_http_next_body_filter(r, in);
   }
 
-  if (ngx_http_brotli_filter_ensure_stream_initialized(r, ctx) != NGX_OK) {
-    ngx_http_brotli_filter_close(ctx);
-    return NGX_ERROR;
-  }
-
   /* If more input is provided - append it to our input chain. */
   if (in) {
     if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
@@ -367,6 +374,39 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       return NGX_ERROR;
     }
     r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+  }
+
+  /* Choosing the encoder window costs memory that scales with the window, so
+     when the response size is unknown it is worth waiting a moment to see if
+     the whole thing turns up. Brotli emits nothing for non-flush input below
+     its block size anyway, so holding it here costs no latency. */
+  if (!ctx->initialized) {
+    size_t pending;
+    ngx_uint_t complete;
+    ngx_uint_t urgent;
+
+    pending = ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
+
+    if (complete) {
+      /* Whole response in hand: size the window from it exactly. */
+      if (ctx->content_length < 0) {
+        ctx->content_length = (off_t)pending;
+      }
+    } else if (in != NULL && !urgent && ctx->content_length < 0 &&
+               pending < NGX_HTTP_BROTLI_DEFER_INPUT) {
+      /* Still might be a small response. Wait for the rest rather than commit
+         to the configured window. A NULL "in" means the caller wants progress,
+         and "urgent" means a filter downstream is waiting on these bytes; in
+         both cases stop holding and start encoding. */
+      ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                     "brotli deferring encoder: pending:%uz", pending);
+      return NGX_OK;
+    }
+  }
+
+  if (ngx_http_brotli_filter_ensure_stream_initialized(r, ctx) != NGX_OK) {
+    ngx_http_brotli_filter_close(ctx);
+    return NGX_ERROR;
   }
 
   /* Main loop:
@@ -523,6 +563,27 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
   /* unreachable */
   ngx_http_brotli_filter_close(ctx);
   return NGX_ERROR;
+}
+
+static size_t ngx_http_brotli_filter_pending_input(ngx_chain_t* in,
+                                                   ngx_uint_t* complete,
+                                                   ngx_uint_t* urgent) {
+  size_t total = 0;
+
+  *complete = 0;
+  *urgent = 0;
+
+  for (; in; in = in->next) {
+    total += ngx_buf_size(in->buf);
+    if (in->buf->last_buf) {
+      *complete = 1;
+    }
+    if (in->buf->flush) {
+      *urgent = 1;
+    }
+  }
+
+  return total;
 }
 
 static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
