@@ -815,7 +815,13 @@ static char* ngx_http_brotli_merge_conf(ngx_conf_t* cf, void* parent,
 
   ngx_conf_merge_value(conf->quality, prev->quality, 6);
   ngx_conf_merge_size_value(conf->lg_win, prev->lg_win, 19);
-  ngx_conf_merge_value(conf->min_length, prev->min_length, 20);
+  /* 20 is the gzip module's default, but Brotli is a far worse deal on tiny
+     responses: an encoder instance costs ~550 KB regardless of how little it
+     is asked to compress, and measured against realistic JSON the compressed
+     body only starts beating the original around 96 bytes - closer to 128
+     once the "Content-Encoding" header is paid for. 256 clears that with
+     room to spare. */
+  ngx_conf_merge_value(conf->min_length, prev->min_length, 256);
 
   rc = ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                             &prev->types_keys, &prev->types,

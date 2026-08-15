@@ -195,8 +195,12 @@ def build_fixtures(work):
         # Over brotli_min_length, but small enough that a known Content-Length
         # drives lg_win well below brotli_window.
         "small.html": f"<html><body>{make_text(200, 2)}</body></html>",
-        # Under brotli_min_length (128).
+        # Under any sane brotli_min_length.
         "tiny.html": "<html>hi</html>",
+        # Bracket the compiled-in brotli_min_length default: the first must be
+        # too small to be worth compressing, the second comfortably worth it.
+        "under_min.html": ("<html><body>" + "x" * 176 + "</body></html>"),
+        "over_min.html": ("<html><body>" + "y" * 376 + "</body></html>"),
         # Not in brotli_types.
         "data.bin": make_text(500, 3),
     }
@@ -566,6 +570,37 @@ def test_min_length(ctx):
         f"{headers.get('content-encoding')}",
     )
     check(body == ctx.fixtures["tiny.html"], "tiny.html body was altered")
+
+
+@test("default brotli_min_length leaves a 200 byte response alone")
+def test_min_length_default_lower(ctx):
+    """Guards the compiled-in default, which the test config deliberately does
+    not override. A response this small costs more to compress than it saves."""
+    body_len = len(ctx.fixtures["under_min.html"])
+    _, headers, body = fetch(ctx.port, "/under_min.html")
+    check(
+        "content-encoding" not in headers,
+        f"a {body_len} byte response was compressed; brotli_min_length has "
+        f"dropped below it",
+    )
+    check(body == ctx.fixtures["under_min.html"], "under_min.html was altered")
+
+
+@test(
+    "default brotli_min_length still compresses a 400 byte response", needs_decoder=True
+)
+def test_min_length_default_upper(ctx):
+    body_len = len(ctx.fixtures["over_min.html"])
+    _, headers, body = fetch(ctx.port, "/over_min.html")
+    check(
+        headers.get("content-encoding") == "br",
+        f"a {body_len} byte response was not compressed; brotli_min_length has "
+        f"risen above it",
+    )
+    check(
+        ctx.decode(body) == ctx.fixtures["over_min.html"],
+        "decoded over_min.html differs from the original",
+    )
 
 
 @test("MIME type outside brotli_types is left alone")

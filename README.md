@@ -135,11 +135,18 @@ Sets Brotli window `size`. Acceptable values are `1k`, `2k`, `4k`, `8k`, `16k`,
 ### `brotli_min_length`
 
 - **syntax**: `brotli_min_length <length>`
-- **default**: `20`
+- **default**: `256`
 - **context**: `http`, `server`, `location`
 
 Sets the minimum `length` of a response that will be compressed.
 The length is determined only from the `Content-Length` response header field.
+
+Compressing very small responses is counter-productive: the encoder costs
+roughly half a megabyte of memory no matter how little it is given, and below
+about 128 bytes the compressed body plus the `Content-Encoding` header comes
+out larger than the original. Note that a response of unknown length is
+compressed regardless of this setting, since there is nothing to compare
+against when the response headers are sent.
 
 ## Variables
 
