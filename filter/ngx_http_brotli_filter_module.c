@@ -95,6 +95,9 @@ static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx);
 
 static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size);
 static void ngx_http_brotli_filter_free(void* opaque, void* address);
+/* Releases the encoder if the request is terminated before compression is
+   finished, i.e. when ngx_http_brotli_filter_close is never reached. */
+static void ngx_http_brotli_filter_cleanup(void* data);
 
 static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* r);
 
@@ -525,6 +528,7 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
 static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
     ngx_http_request_t* r, ngx_http_brotli_ctx_t* ctx) {
   ngx_http_brotli_conf_t* conf;
+  ngx_pool_cleanup_t* cln;
   BROTLI_BOOL ok;
   size_t wbits;
 
@@ -544,6 +548,16 @@ static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
   } else {
     wbits = conf->lg_win;
   }
+
+  /* Encoder memory is not owned by the pool, so arrange for it to be released
+     even if the request is aborted mid-stream. Registered before the encoder
+     exists, so that a failure here can not strand an allocated instance. */
+  cln = ngx_pool_cleanup_add(r->pool, 0);
+  if (cln == NULL) {
+    return NGX_ERROR;
+  }
+  cln->handler = ngx_http_brotli_filter_cleanup;
+  cln->data = ctx;
 
   ctx->encoder = BrotliEncoderCreateInstance(
       ngx_http_brotli_filter_alloc, ngx_http_brotli_filter_free, r->pool);
@@ -591,11 +605,15 @@ static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
   return NGX_OK;
 }
 
+/* The encoder allocates from the heap, not from the request pool. Brotli makes
+   frequent short-lived sub-page allocations (e.g. one per meta-block), and
+   ngx_pfree only reclaims "large" blocks, so pool-backed ones would pile up
+   until the request ends. "opaque" is still the pool, but only for logging. */
 static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size) {
   ngx_pool_t* pool = opaque;
   void* p;
 
-  p = ngx_palloc(pool, size);
+  p = ngx_alloc(size, pool->log);
 
 #if (NGX_DEBUG)
   ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pool->log, 0, "brotli alloc: %p, size:%uz",
@@ -606,13 +624,24 @@ static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size) {
 }
 
 static void ngx_http_brotli_filter_free(void* opaque, void* address) {
+#if (NGX_DEBUG)
   ngx_pool_t* pool = opaque;
 
-#if (NGX_DEBUG)
   ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pool->log, 0, "brotli free: %p", address);
 #endif
 
-  ngx_pfree(pool, address);
+  ngx_free(address);
+}
+
+static void ngx_http_brotli_filter_cleanup(void* data) {
+  ngx_http_brotli_ctx_t* ctx = data;
+
+  /* Normally the encoder is already gone: ngx_http_brotli_filter_close resets
+     the field. This is the abort path. */
+  if (ctx->encoder != NULL) {
+    BrotliEncoderDestroyInstance(ctx->encoder);
+    ctx->encoder = NULL;
+  }
 }
 
 static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx) {
