@@ -27,6 +27,7 @@ ngx_brotli is a set of two nginx modules:
 - [Variables](#variables)
   - [`$brotli_ratio`](#brotli_ratio)
 - [Sample configuration](#sample-configuration)
+- [Tests](#tests)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -159,6 +160,33 @@ brotli_types application/atom+xml application/javascript application/json applic
              font/eot font/opentype font/otf font/truetype image/svg+xml image/vnd.microsoft.icon
              image/x-icon image/x-win-bitmap text/css text/javascript text/plain text/xml;
 ```
+
+## Tests
+
+Two suites, both expecting an nginx binary built with this module:
+
+```bash
+script/.travis-compile.sh      # builds ./nginx and the brotli CLI
+script/.travis-before-test.sh  # fetches the sample corpus
+script/.travis-test.sh         # static files and Accept-Encoding parsing
+python3 script/test_stream.py  # streaming responses and encoder lifetime
+```
+
+`test_stream.py` covers what the shell suite does not: responses whose length
+is unknown until the body has been streamed, and the lifetime of the Brotli
+encoder instance, which owns heap memory that the request pool does not
+release on its own. It starts its own nginx, generates its own fixtures and
+runs its own stalling upstream, so it needs no setup beyond a binary:
+
+```bash
+python3 script/test_stream.py --nginx /path/to/nginx
+```
+
+It exits with the number of failed tests. The window and memory tests read the
+encoder's allocator tracing out of the debug log, so build nginx with
+`--with-debug` to run them - they are skipped, not failed, on a release build.
+Round-trip tests need a brotli decoder, either the python `brotli` module or
+the CLI that `script/.travis-compile.sh` builds into `deps/brotli/out`.
 
 ## Contributing
 
