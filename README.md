@@ -35,6 +35,13 @@ ngx_brotli is a set of two nginx modules:
 
 Both Brotli library and nginx module are under active development.
 
+Two defaults have changed in favour of a smaller memory footprint, which is
+worth knowing when upgrading. `brotli_window` is now `64k` rather than `512k`,
+cutting per-request encoder memory by roughly 70% at the cost of a few percent
+of compression, and `brotli_min_length` is now `256` rather than `20`, so very
+small responses are no longer compressed at all. Set either explicitly to keep
+the old behaviour.
+
 ## Installation
 
 ### Statically compiled
@@ -126,11 +133,23 @@ Acceptable values are in the range from `0` to `11`.
 ### `brotli_window`
 
 - **syntax**: `brotli_window <size>`
-- **default**: `512k`
+- **default**: `64k`
 - **context**: `http`, `server`, `location`
 
 Sets Brotli window `size`. Acceptable values are `1k`, `2k`, `4k`, `8k`, `16k`,
 `32k`, `64k`, `128k`, `256k`, `512k`, `1m`, `2m`, `4m`, `8m` and `16m`.
+
+This is the single biggest influence on how much memory a request costs, but
+not in a straight line: at `64k` and below Brotli selects a much cheaper
+hasher, and above it encoder memory jumps sharply. Measured on HTML, a
+streamed response costs roughly 970 KB at `64k` against 3.4 MB at `512k`,
+while compressing about 2.7% worse. `32k` and `16k` occupy the same memory as
+`64k` and only compress worse, so there is little reason to go below it.
+
+Raise it if responses are large and bandwidth matters more than memory; a
+window larger than the response body buys nothing. Note that when the response
+length is known the module already lowers the window to fit, so this setting
+mainly affects streamed responses and bodies larger than the window.
 
 ### `brotli_min_length`
 

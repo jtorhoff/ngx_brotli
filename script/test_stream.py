@@ -43,8 +43,9 @@ CONF = os.path.join(ROOT, "script", "test_stream.conf")
 PORT = 8899
 UPSTREAM_PORT = 8901
 
-# Must track brotli_window in test_stream.conf.
-FULL_WINDOW = 512 * 1024
+# The compiled-in brotli_window default, which test_stream.conf deliberately
+# does not override.
+FULL_WINDOW = 64 * 1024
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 

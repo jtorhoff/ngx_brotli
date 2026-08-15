@@ -814,7 +814,13 @@ static char* ngx_http_brotli_merge_conf(ngx_conf_t* cf, void* parent,
   ngx_conf_merge_value(conf->enable, prev->enable, 0);
 
   ngx_conf_merge_value(conf->quality, prev->quality, 6);
-  ngx_conf_merge_size_value(conf->lg_win, prev->lg_win, 19);
+  /* 16 bits (64k) rather than the 19 (512k) this module used to default to.
+     Brotli picks a much cheaper hasher at lg_win <= 16, so 64k is the largest
+     window before encoder memory jumps: measured on HTML, a streamed response
+     costs ~970 KB here against ~3.4 MB at 512k, for ~2.7% larger output. 32k
+     and 16k cost the same memory as 64k while compressing worse, so 64k is
+     the useful floor rather than the smallest possible value. */
+  ngx_conf_merge_size_value(conf->lg_win, prev->lg_win, 16);
   /* 20 is the gzip module's default, but Brotli is a far worse deal on tiny
      responses: an encoder instance costs ~550 KB regardless of how little it
      is asked to compress, and measured against realistic JSON the compressed
