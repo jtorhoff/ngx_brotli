@@ -95,6 +95,24 @@ Enables or disables checking of the existence of pre-compressed files with`.br`
 extension. With the `always` value, pre-compressed file is used in all cases,
 without checking if the client supports it.
 
+Serving a pre-compressed file is by far the cheapest option: no encoder is
+created, so the request costs neither the compression CPU nor the ~1 MB of
+encoder memory that on-the-fly compression needs. Prefer it wherever the
+content is static.
+
+The catch is that every eligible request probes for `<path>.br`, and when that
+file does not exist the probe reaches the filesystem **on every request**
+unless negative results are cached. Caching them requires both directives:
+
+```nginx
+open_file_cache          max=1000 inactive=60s;
+open_file_cache_errors   on;      # without this the .br miss is never cached
+```
+
+`open_file_cache` on its own is not enough - it caches the file that was found,
+not the one that was missing. Set both if `brotli_static` is on in a location
+where most files have no `.br` sibling.
+
 ### `brotli`
 
 - **syntax**: `brotli on|off`
@@ -102,6 +120,28 @@ without checking if the client supports it.
 - **context**: `http`, `server`, `location`, `if`
 
 Enables or disables on-the-fly compression of responses.
+
+#### Proxied responses and time to first byte
+
+Brotli accumulates roughly 64 KB of input before it emits anything, unless it
+is explicitly told to flush. For a proxied response this interacts with
+`proxy_buffering`, and the difference is large.
+
+With `proxy_buffering on` (the default) nginx hands this filter buffers that
+carry no flush marker, so the encoder waits for a full block before producing
+output - and because nginx sends the response header together with the first
+body write, the header waits too. Measured against an upstream trickling
+240 KB as 8 KB every 50 ms, the client saw nothing for **813 ms**. The same
+response uncompressed started arriving in 1 ms.
+
+With `proxy_buffering off` every buffer is flush-marked, the filter compresses
+and forwards it immediately, and time to first byte drops to **1 ms** for about
+3.8% larger output.
+
+So if a location streams slowly-produced responses - server-sent events, long
+polling, progressive HTML - either turn `proxy_buffering off` or leave `brotli`
+off there. For ordinary responses that arrive quickly the distinction does not
+matter, since a full block is available almost at once.
 
 ### `brotli_types`
 
@@ -180,6 +220,12 @@ and compressed response sizes.
 brotli on;
 brotli_comp_level 6;
 brotli_static on;
+
+# brotli_static probes for <path>.br on every request; these two keep a
+# missing sibling from reaching the filesystem each time.
+open_file_cache        max=1000 inactive=60s;
+open_file_cache_errors on;
+
 brotli_types application/atom+xml application/javascript application/json application/vnd.api+json application/rss+xml
              application/vnd.ms-fontobject application/x-font-opentype application/x-font-truetype
              application/x-font-ttf application/x-javascript application/xhtml+xml application/xml

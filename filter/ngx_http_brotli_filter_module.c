@@ -21,8 +21,14 @@
 #define NGX_HTTP_BROTLI_BUFFERED NGX_HTTP_GZIP_BUFFERED
 
 /* How much input may be held back while waiting to learn the response size.
-   Matches Brotli's own input block size: the encoder would have buffered this
-   much internally without emitting anything, so the wait is not observable. */
+   Chosen to match Brotli's input block size at the qualities that use one:
+   the encoder would have buffered that much internally without emitting
+   anything, so holding it here is not observable. Note the block is only 64k
+   for quality 4 and above - below that Brotli uses 16k (see ComputeLgBlock),
+   and this cap is larger than the encoder's own. That costs nothing today
+   because the deferral almost always ends earlier, when the caller asks for
+   progress with a NULL chain, but it is why this is a ceiling rather than a
+   target. */
 #define NGX_HTTP_BROTLI_DEFER_INPUT (64 * 1024)
 
 /* Module configuration. */
