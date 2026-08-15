@@ -162,6 +162,10 @@ def port_is_free(port):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# Comfortably over the default brotli_min_length, so a status code is the
+# only thing that can stop these responses being compressed.
+STATUS_BODY = ("<html><body>" + "status guard body " * 40 + "</body></html>").encode()
+
 WORDS = [
     "brotli",
     "nginx",
@@ -271,6 +275,13 @@ class Upstream:
         try:
             request = conn.recv(65536).decode("latin-1")
             path = request.split(" ")[1] if " " in request else "/"
+
+            # Must come before the chunked 200 below - these replies write
+            # their own status line.
+            if path.startswith("/status/"):
+                self._status(conn, int(path.rsplit("/", 1)[-1]))
+                return
+
             conn.sendall(
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: text/html\r\n"
@@ -294,6 +305,30 @@ class Upstream:
         finally:
             with contextlib.suppress(OSError):
                 conn.close()
+
+    def _status(self, conn, code):
+        """Replies with `code`, in the shape that used to defeat the filter.
+
+        204 and 304 are sent without a Content-Length, since with one the
+        min-length check masks the bug; 206 carries a Content-Range that a
+        compressed body would contradict.
+        """
+        body = STATUS_BODY
+        if code in (204, 304):
+            conn.sendall(
+                f"HTTP/1.1 {code} Status\r\nContent-Type: text/html\r\n\r\n".encode()
+            )
+            return
+        extra = ""
+        if code == 206:
+            extra = f"Content-Range: bytes 0-{len(body) - 1}/{len(body) * 4}\r\n"
+        conn.sendall(
+            (
+                f"HTTP/1.1 {code} Status\r\nContent-Type: text/html\r\n"
+                f"{extra}Content-Length: {len(body)}\r\n\r\n"
+            ).encode()
+            + body
+        )
 
     def shutdown(self):
         self.stop.set()
@@ -602,6 +637,39 @@ def test_min_length_default_upper(ctx):
         ctx.decode(body) == ctx.fixtures["over_min.html"],
         "decoded over_min.html differs from the original",
     )
+
+
+@test("bodyless and ranged statuses are not given a Content-Encoding")
+def test_status_guard(ctx):
+    """204 and 304 have no body to encode, and a 206 body is a byte range whose
+    Content-Range still describes the uncompressed entity. Labelling any of
+    them "br" corrupts the response."""
+    for code in (204, 304, 206):
+        status, headers, _ = fetch(ctx.port, f"/status/{code}")
+        check(status == code, f"expected {code} to reach the client, got {status}")
+        check(
+            "content-encoding" not in headers,
+            f"a {code} response was labelled "
+            f"{headers.get('content-encoding')!r}; it must not be compressed",
+        )
+
+
+@test("other statuses are still compressed", needs_decoder=True)
+def test_status_guard_not_too_broad(ctx):
+    """The guard replaced an allow list that also excluded these. They are
+    ordinary compressible responses and must stay compressed."""
+    for code in (200, 201, 403, 404, 422, 500):
+        status, headers, body = fetch(ctx.port, f"/status/{code}")
+        check(status == code, f"expected {code} to reach the client, got {status}")
+        check(
+            headers.get("content-encoding") == "br",
+            f"a {code} response should still be compressed, got "
+            f"{headers.get('content-encoding')!r}",
+        )
+        check(
+            ctx.decode(body) == STATUS_BODY,
+            f"the {code} body did not decode back to the original",
+        )
 
 
 @test("MIME type outside brotli_types is left alone")

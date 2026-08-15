@@ -292,6 +292,23 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
     return ngx_http_next_header_filter(r);
   }
 
+  /* Bypass statuses that either carry no body, or carry one that must not be
+     re-encoded. 1xx/204/304 have no body to compress, so all they would get
+     is a "Content-Encoding" describing nothing - which a client is entitled
+     to apply to the next body it associates with the response. A 206 body is
+     a byte range, and the "Content-Range" beside it still describes the
+     original entity, so compressing it corrupts the response.
+
+     This is deliberately a deny list. The allow list it replaces (200/403/404
+     only, dropped in eebeaf3) also excluded perfectly compressible responses
+     such as 201, 422 and 500; those stay compressed. */
+  if (r->headers_out.status < NGX_HTTP_OK ||
+      r->headers_out.status == NGX_HTTP_NO_CONTENT ||
+      r->headers_out.status == NGX_HTTP_PARTIAL_CONTENT ||
+      r->headers_out.status == NGX_HTTP_NOT_MODIFIED) {
+    return ngx_http_next_header_filter(r);
+  }
+
   /* Bypass already compressed responses. */
   if (r->headers_out.content_encoding &&
       r->headers_out.content_encoding->value.len) {

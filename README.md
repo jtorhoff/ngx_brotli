@@ -121,6 +121,10 @@ where most files have no `.br` sibling.
 
 Enables or disables on-the-fly compression of responses.
 
+Responses of any status are compressed, with the exception of those that carry
+no body (`1xx`, `204`, `304`) or whose body is a byte range (`206`), since
+labelling those with a `Content-Encoding` would corrupt the response.
+
 #### Proxied responses and time to first byte
 
 Brotli accumulates roughly 64 KB of input before it emits anything, unless it
