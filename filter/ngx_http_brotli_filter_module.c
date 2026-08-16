@@ -8,6 +8,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include "../ngx_http_brotli_accept_encoding.h"
+
 #if (NGX_HAVE_BROTLI_ENC_ENCODE_H)
 #include <brotli/enc/encode.h>
 #else
@@ -218,102 +220,6 @@ static ngx_str_t ngx_http_brotli_ratio = ngx_string("brotli_ratio");
 /* Next filter in the filter chain. */
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
-
-static /* const */ char kEncoding[] = "br";
-static const size_t kEncodingLen = 2;
-
-/* Optional whitespace, as RFC 9110 defines it for list separators. */
-#define ngx_http_brotli_is_optional_whitespace(c) ((c) == ' ' || (c) == '\t')
-
-static u_char* skip_optional_whitespace(u_char* cursor, u_char* end) {
-  while (cursor < end && ngx_http_brotli_is_optional_whitespace(*cursor)) {
-    cursor++;
-  }
-  return cursor;
-}
-
-/* Given the text following an encoding token, reports whether its parameters
-   set the quality to zero, i.e. ";q=0", ";q=0.0", ";q=0.00" or ";q=0.000".
-   Anything else - a different weight, an unrecognised parameter, no
-   parameters at all - counts as acceptable. */
-static ngx_uint_t is_zero_weighted(u_char* cursor, u_char* end) {
-  ngx_uint_t digits;
-
-  cursor = skip_optional_whitespace(cursor, end);
-  if (cursor == end || *cursor++ != ';') return 0;
-  cursor = skip_optional_whitespace(cursor, end);
-  if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) return 0;
-  cursor++;
-  cursor = skip_optional_whitespace(cursor, end);
-  if (cursor == end || *cursor++ != '=') return 0;
-  cursor = skip_optional_whitespace(cursor, end);
-  /* Any weight not starting with "0" is non-zero. */
-  if (cursor == end || *cursor++ != '0') return 0;
-  /* "q=0" with nothing after it, or with no fraction. */
-  if (cursor == end || *cursor != '.') return 1;
-  cursor++;
-  /* RFC 9110 permits at most three digits after the point. */
-  for (digits = 0; digits < 3; digits++) {
-    if (cursor == end) return 1;              /* "q=0." */
-    if (*cursor < '0' || *cursor > '9') return 1;
-    if (*cursor > '0') return 0;               /* a non-zero digit */
-    cursor++;
-  }
-  return 1;
-}
-
-/* Decides whether the client will accept Brotli.
-
-   "br" is taken whenever it appears as a token in Accept-Encoding, whatever
-   weight it carries, with the single exception of an explicit zero - which
-   RFC 9110 defines as "not acceptable". Relative weights are deliberately
-   ignored, so "gzip;q=1.0, br;q=0.1" still selects Brotli. Choosing Brotli
-   then suppresses gzip for the request, in ngx_http_brotli_check_request. */
-static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
-  ngx_table_elt_t* accept_encoding_entry;
-  ngx_str_t* accept_encoding;
-  u_char* start;
-  u_char* cursor;
-  u_char* end;
-  u_char before;
-  u_char after;
-
-  accept_encoding_entry = req->headers_in.accept_encoding;
-  if (accept_encoding_entry == NULL) return NGX_DECLINED;
-  accept_encoding = &accept_encoding_entry->value;
-
-  if (accept_encoding->len < kEncodingLen) return NGX_DECLINED;
-
-  start = accept_encoding->data;
-  end = start + accept_encoding->len;
-  cursor = start;
-
-  for (;;) {
-    /* Bounded search, so a header without a terminating NUL can not be run
-       off the end of. */
-    cursor =
-        ngx_strlcasestrn(cursor, end, (u_char*)kEncoding, kEncodingLen - 1);
-    if (cursor == NULL) return NGX_DECLINED;
-
-    /* "br" has to stand alone as a token; reject a match inside a longer one
-       such as "brotli" or "x-br". A match at either edge of the header is
-       treated as if a separator sat beside it. */
-    before = (cursor == start) ? ',' : cursor[-1];
-    cursor += kEncodingLen;
-    after = (cursor == end) ? ',' : *cursor;
-
-    if (before != ',' && !ngx_http_brotli_is_optional_whitespace(before)) {
-      continue;
-    }
-    if (after != ',' && after != ';' &&
-        !ngx_http_brotli_is_optional_whitespace(after)) {
-      continue;
-    }
-
-    if (is_zero_weighted(cursor, end)) return NGX_DECLINED;
-    return NGX_OK;
-  }
-}
 
 /* Process headers and decide if request is eligible for brotli compression. */
 static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
@@ -787,7 +693,7 @@ static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx) {
 
 static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* req) {
   if (req != req->main) return NGX_DECLINED;
-  if (check_accept_encoding(req) != NGX_OK) return NGX_DECLINED;
+  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) return NGX_DECLINED;
   req->gzip_tested = 1;
   req->gzip_ok = 0;
   return NGX_OK;
