@@ -540,6 +540,40 @@ def allocator_events(log):
     return stats
 
 
+def wait_for_encoder_release(nginx, timeout=10.0):
+    """Polls the debug log until every traced request has been torn down.
+
+    A client can hold the whole response before the worker has released the
+    encoder. The last output block is written to the socket from inside the
+    body filter's output branch, and the encoder is only destroyed on the loop
+    iteration after that - once BrotliEncoderIsFinished is reached with no
+    output outstanding. It cannot be destroyed any earlier: ctx->out_buf points
+    into memory owned by the encoder, handed out by BrotliEncoderTakeOutput.
+
+    So reading the log the instant fetch() returns races the teardown. The race
+    is almost never lost on an idle machine and lost regularly on a loaded CI
+    runner, which is what made this look like an intermittent leak.
+
+    Waits for "http close request" as well as for the allocation counts to
+    balance, because the abort path frees the encoder from the pool cleanup
+    handler - that is, inside ngx_destroy_pool, after that line is logged.
+
+    Returns the stats either way: on a real leak this times out, and the
+    caller's assertions then report what actually went wrong.
+    """
+    deadline = time.time() + timeout
+    while True:
+        stats = allocator_events(nginx.read_log())
+        active = [entry for entry in stats.values() if entry["allocs"]]
+        settled = active and all(
+            entry["closed"] and entry["allocs"] == entry["frees"] and not entry["live"]
+            for entry in active
+        )
+        if settled or time.time() >= deadline:
+            return stats
+        time.sleep(0.05)
+
+
 def assert_balanced(stats, label):
     active = {conn: entry for conn, entry in stats.items() if entry["allocs"]}
     check(active, f"{label}: no encoder allocations were traced at all")
@@ -1012,14 +1046,14 @@ def test_stream_uses_full_window(ctx):
 def test_alloc_balance_static(ctx):
     ctx.nginx.truncate_log()
     fetch(ctx.port, "/big.html")
-    assert_balanced(allocator_events(ctx.nginx.read_log()), "static")
+    assert_balanced(wait_for_encoder_release(ctx.nginx), "static")
 
 
 @test("encoder allocations balance on a streamed response", needs_debug=True)
 def test_alloc_balance_stream(ctx):
     ctx.nginx.truncate_log()
     fetch(ctx.port, "/stream/big.html")
-    assert_balanced(allocator_events(ctx.nginx.read_log()), "stream")
+    assert_balanced(wait_for_encoder_release(ctx.nginx), "stream")
 
 
 @test("repeated requests neither leak nor drift", needs_debug=True)
@@ -1028,7 +1062,7 @@ def test_alloc_soak(ctx):
     ctx.nginx.truncate_log()
     for _ in range(rounds):
         fetch(ctx.port, "/big.html")
-    active = assert_balanced(allocator_events(ctx.nginx.read_log()), "soak")
+    active = assert_balanced(wait_for_encoder_release(ctx.nginx), "soak")
 
     check(
         len(active) == rounds, f"expected {rounds} traced requests, saw {len(active)}"
@@ -1044,8 +1078,9 @@ def test_alloc_soak(ctx):
 def test_cleanup_handler_on_abort(ctx):
     ctx.nginx.truncate_log()
     fetch_and_abort(ctx.port, "/slow")
-    time.sleep(2.5)  # let nginx notice the reset and tear the request down
-    active = assert_balanced(allocator_events(ctx.nginx.read_log()), "abort")
+    # Polls rather than sleeping a fixed 2.5s for nginx to notice the reset:
+    # faster here, and it does not give up early on a loaded runner.
+    active = assert_balanced(wait_for_encoder_release(ctx.nginx), "abort")
 
     # The point of this test. The encoder must be released by the pool cleanup
     # handler, which runs inside ngx_destroy_pool - after nginx has logged
