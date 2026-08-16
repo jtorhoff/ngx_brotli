@@ -278,6 +278,10 @@ class Upstream:
 
             # Must come before the chunked 200 below - these replies write
             # their own status line.
+            if path.startswith("/dribble"):
+                self._dribble(conn)
+                return
+
             if path.startswith("/status/"):
                 self._status(conn, int(path.rsplit("/", 1)[-1]))
                 return
@@ -305,6 +309,20 @@ class Upstream:
         finally:
             with contextlib.suppress(OSError):
                 conn.close()
+
+    def _dribble(self, conn):
+        """Sends a chunk every 50 ms without ever setting a flush marker, so
+        the encoder decides on its own when to emit. Used to check that the
+        filter does not sit on the whole response."""
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+        chunk = b"<html><body>" + b"dribbled brotli payload " * 340
+        for _ in range(20):
+            conn.sendall(self._chunk(chunk))
+            time.sleep(0.05)
+        conn.sendall(b"0\r\n\r\n")
 
     def _status(self, conn, code):
         """Replies with `code`, in the shape that used to defeat the filter.
@@ -636,6 +654,54 @@ def test_min_length_default_upper(ctx):
     check(
         ctx.decode(body) == ctx.fixtures["over_min.html"],
         "decoded over_min.html differs from the original",
+    )
+
+
+@test("a slowly-produced response starts arriving before it finishes")
+def test_ttfb_on_buffered_stream(ctx):
+    """With proxy_buffering on nothing sets a flush marker, so left alone the
+    encoder holds everything until a 64 KB block fills - which for a trickling
+    upstream means the client waits. The filter asks the encoder to flush when
+    the caller wants progress, so the first bytes should arrive early rather
+    than near the end.
+
+    Timing based, deliberately with a wide margin: unfixed this was ~50% of
+    total elapsed, fixed it is a few percent.
+    """
+    sock = socket.create_connection(("127.0.0.1", ctx.port), timeout=60)
+    try:
+        started = time.perf_counter()
+        sock.sendall(
+            b"GET /dribble HTTP/1.1\r\nHost: localhost\r\n"
+            b"Connection: close\r\nAccept-Encoding: br\r\n\r\n"
+        )
+        head, first_body, total = b"", None, 0
+        while True:
+            data = sock.recv(65536)
+            if not data:
+                break
+            now = time.perf_counter()
+            if first_body is None:
+                head += data
+                if b"\r\n\r\n" in head:
+                    body = head.split(b"\r\n\r\n", 1)[1]
+                    if body:
+                        first_body = now
+                        total += len(body)
+            else:
+                total += len(data)
+        finished = time.perf_counter()
+    finally:
+        sock.close()
+
+    check(first_body is not None, "no body ever arrived")
+    ttfb = first_body - started
+    elapsed = finished - started
+    check(
+        ttfb < elapsed * 0.4,
+        f"first byte took {ttfb * 1000:.0f} ms of {elapsed * 1000:.0f} ms "
+        f"total ({100 * ttfb / elapsed:.0f}%); the encoder is sitting on the "
+        f"response instead of flushing when asked for progress",
     )
 
 

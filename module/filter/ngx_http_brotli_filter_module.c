@@ -92,6 +92,10 @@ typedef struct {
 
   unsigned end_of_input : 1;
   unsigned end_of_block : 1;
+  /* 1 if input has been handed to the encoder that it has not been asked to
+     emit yet. BROTLI_OPERATION_PROCESS holds such data back until a block
+     fills, so it has to be flushed explicitly when the caller wants output. */
+  unsigned unflushed_input : 1;
 
   ngx_http_request_t* request;
 } ngx_http_brotli_ctx_t;
@@ -485,6 +489,28 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     }
 
     if (ctx->in == NULL) {
+      /* A NULL chain means the caller wants whatever we have. If the encoder
+         is holding input that PROCESS will not emit until a block fills, ask
+         for it now: without this a slowly-produced response stalls until
+         64 KB has accumulated. Costs a few percent of ratio, because each
+         flush closes a meta-block early. */
+      if (in == NULL && ctx->unflushed_input) {
+        available_input = 0;
+        available_output = 0;
+        ok = BrotliEncoderCompressStream(ctx->encoder, BROTLI_OPERATION_FLUSH,
+                                         &available_input, NULL,
+                                         &available_output, NULL, NULL);
+        ctx->unflushed_input = 0;
+        /* Mark the resulting buffer so the filters below push it out rather
+           than holding it for more. */
+        ctx->end_of_block = 1;
+        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+        if (!ok) {
+          ngx_http_brotli_filter_close(ctx);
+          return NGX_ERROR;
+        }
+        continue;
+      }
       return NGX_OK;
     }
 
@@ -522,6 +548,14 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     consumed_input = input_size - available_input;
     ctx->bytes_in += consumed_input;
     ctx->in->buf->pos += consumed_input;
+
+    if (operation == BROTLI_OPERATION_PROCESS) {
+      if (consumed_input > 0) {
+        ctx->unflushed_input = 1;
+      }
+    } else {
+      ctx->unflushed_input = 0;
+    }
 
     if (consumed_input == input_size) {
       if (ctx->in->buf->last_buf) {
