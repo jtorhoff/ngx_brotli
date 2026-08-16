@@ -91,7 +91,7 @@ static ngx_uint_t ngx_http_brotli_is_zero_weighted(u_char* cursor,
    weight it carries, with the single exception of an explicit zero - which
    RFC 9110 defines as "not acceptable". Relative weights are deliberately
    ignored, so "gzip;q=1.0, br;q=0.1" still selects Brotli. Choosing Brotli
-   then suppresses gzip for the request, in ngx_http_brotli_check_request. */
+   then suppresses gzip for the request, in ngx_http_brotli_claim_request. */
 static ngx_int_t ngx_http_brotli_check_accept_encoding(
     ngx_http_request_t* req) {
   ngx_table_elt_t* accept_encoding_entry;
@@ -153,6 +153,33 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
     }
     return NGX_OK;
   }
+}
+
+/* Decides whether this request should be served Brotli at all, and claims it
+   if so. Shared by both modules, which had identical copies of this.
+
+   Returns NGX_OK only for a main request from a client that named "br" and
+   speaks at least HTTP/1.1. The version test mirrors gzip_http_version, whose
+   default is also 1.1: some HTTP/1.0 clients and intermediaries mishandle a
+   compressed response, and gzip has always declined them.
+
+   Claiming the request means suppressing gzip for it, so that a client
+   advertising both gets Brotli. That happens only once every test has passed:
+   when Brotli declines, gzip is left free to make its own decision, including
+   applying its own version and proxy rules. */
+static ngx_int_t ngx_http_brotli_claim_request(ngx_http_request_t* req) {
+  if (req != req->main) {
+    return NGX_DECLINED;
+  }
+  if (req->http_version < NGX_HTTP_VERSION_11) {
+    return NGX_DECLINED;
+  }
+  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) {
+    return NGX_DECLINED;
+  }
+  req->gzip_tested = 1;
+  req->gzip_ok = 0;
+  return NGX_OK;
 }
 
 #endif /* NGX_HTTP_BROTLI_ACCEPT_ENCODING_H_INCLUDED_ */

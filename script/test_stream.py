@@ -850,6 +850,42 @@ def test_encoding_lists(ctx):
         )
 
 
+@test("HTTP/1.0 clients are not served Brotli")
+def test_http_version_gate(ctx):
+    """Mirrors gzip_http_version, whose default is 1.1. Declining still leaves
+    Vary advertised, as the gzip filter does, so a cache in front keeps the
+    responses apart."""
+
+    def raw(version):
+        sock = socket.create_connection(("127.0.0.1", ctx.port), timeout=30)
+        try:
+            sock.sendall(
+                f"GET /big.html HTTP/{version}\r\nHost: localhost\r\n"
+                f"Accept-Encoding: br\r\nConnection: close\r\n\r\n".encode()
+            )
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            sock.close()
+        head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+        lower = [line.lower() for line in head.split("\r\n")]
+        return (
+            any(line.startswith("content-encoding: br") for line in lower),
+            any(line.startswith("vary:") for line in lower),
+        )
+
+    compressed, vary = raw("1.0")
+    check(not compressed, "an HTTP/1.0 request was served Brotli")
+    check(vary, "Vary was dropped for the declined HTTP/1.0 request")
+
+    compressed, _ = raw("1.1")
+    check(compressed, "an HTTP/1.1 request was not served Brotli")
+
+
 @test("Vary: Accept-Encoding is advertised to every client")
 def test_vary(ctx):
     for accept in ["br", "gzip", None]:

@@ -128,8 +128,6 @@ static void ngx_http_brotli_filter_free(void* opaque, void* address);
    finished, i.e. when ngx_http_brotli_filter_close is never reached. */
 static void ngx_http_brotli_filter_cleanup(void* data);
 
-static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* r);
-
 /* Commits the postponed response headers, compressing or not. */
 static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t* r,
                                                      ngx_http_brotli_ctx_t* ctx,
@@ -289,7 +287,7 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
   r->gzip_vary = 1;
 
   /* Check if client support brotli encoding. */
-  if (ngx_http_brotli_check_request(r) != NGX_OK) {
+  if (ngx_http_brotli_claim_request(r) != NGX_OK) {
     return ngx_http_next_header_filter(r);
   }
 
@@ -821,18 +819,6 @@ static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx) {
     ngx_pfree(ctx->request->pool, ctx->out_buf);
     ctx->out_buf = NULL;
   }
-}
-
-static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* req) {
-  if (req != req->main) {
-    return NGX_DECLINED;
-  }
-  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) {
-    return NGX_DECLINED;
-  }
-  req->gzip_tested = 1;
-  req->gzip_ok = 0;
-  return NGX_OK;
 }
 
 static ngx_int_t ngx_http_brotli_add_variables(ngx_conf_t* cf) {

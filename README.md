@@ -131,14 +131,16 @@ When this module takes a response it disables gzip for that request, so a
 client advertising both encodings receives Brotli whatever relative weights it
 gave them - `gzip;q=1.0, br;q=0.1` still yields Brotli.
 
+Requests below HTTP/1.1 are never compressed, matching the `gzip_http_version`
+default of `1.1`; `Vary: Accept-Encoding` is still advertised to them, so a
+cache in front keeps the two answers apart. This is not configurable.
+
 The consequence is easy to miss: **nginx's own compression controls do not
 apply to Brotli, and suppressing gzip takes them out of play for that request
 too.** This module decides using only `Accept-Encoding`, `brotli_types`,
 `brotli_min_length` and the response status. In particular none of these have
 any effect on it:
 
-- `gzip_http_version`, which defaults to `1.1`. gzip declines to compress for
-  an HTTP/1.0 client; Brotli compresses for one.
 - `gzip_proxied`, which for requests arriving with a `Via` header can be told
   to leave alone responses carrying `Authorization`, `Cache-Control: no-cache`,
   `no-store` or `private`, `Expires`, `Last-Modified` or `ETag`. There is no

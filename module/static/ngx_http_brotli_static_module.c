@@ -82,19 +82,6 @@ static const u_char kContentEncoding[] = "Content-Encoding";
 static /* const */ u_char kSuffix[] = ".br";
 static const size_t kSuffixLen = 3;
 
-/* Test if this request is allowed to have the brotli response. */
-static ngx_int_t check_eligility(ngx_http_request_t* req) {
-  if (req != req->main) {
-    return NGX_DECLINED;
-  }
-  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) {
-    return NGX_DECLINED;
-  }
-  req->gzip_tested = 1;
-  req->gzip_ok = 0;
-  return NGX_OK;
-}
-
 static ngx_int_t handler(ngx_http_request_t* req) {
   configuration_t* cfg;
   ngx_int_t rc;
@@ -129,7 +116,7 @@ static ngx_int_t handler(ngx_http_request_t* req) {
   } else {
     /* NGX_HTTP_BROTLI_STATIC_ON */
     req->gzip_vary = 1;
-    rc = check_eligility(req);
+    rc = ngx_http_brotli_claim_request(req);
     if (rc != NGX_OK) {
       return NGX_DECLINED;
     }
