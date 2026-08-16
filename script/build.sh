@@ -9,7 +9,7 @@
 set -eux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NGINX_REF="${NGINX_REF:-release-1.31.3}"
+NGINX_REF="${NGINX_REF:-release-1.30.4}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
 # Brotli first: nginx links -lbrotlienc out of deps/brotli/out, so the library
