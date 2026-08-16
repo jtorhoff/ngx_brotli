@@ -705,6 +705,38 @@ def test_ttfb_on_buffered_stream(ctx):
     )
 
 
+@test("brotli_min_length applies to responses of unknown length too")
+def test_min_length_on_stream(ctx):
+    """The header filter cannot compare against min_length when it has no
+    Content-Length, so it holds the headers until the body has answered the
+    question. Without that, a tiny chunked response still built a full
+    encoder - about 575 KB to compress 200 bytes."""
+    _, headers, body = fetch(ctx.port, "/buffered/under_min.html")
+    check(
+        "content-encoding" not in headers,
+        f"a {len(ctx.fixtures['under_min.html'])} byte streamed response was "
+        f"compressed; min_length is not being applied without a Content-Length",
+    )
+    check(
+        body == ctx.fixtures["under_min.html"],
+        "the uncompressed streamed body was altered",
+    )
+
+
+@test("a streamed response over min_length is still compressed", needs_decoder=True)
+def test_min_length_on_stream_upper(ctx):
+    _, headers, body = fetch(ctx.port, "/buffered/over_min.html")
+    check(
+        headers.get("content-encoding") == "br",
+        f"a {len(ctx.fixtures['over_min.html'])} byte streamed response should "
+        f"be compressed, got {headers.get('content-encoding')!r}",
+    )
+    check(
+        ctx.decode(body) == ctx.fixtures["over_min.html"],
+        "decoded streamed body differs from the original",
+    )
+
+
 @test("bodyless and ranged statuses are not given a Content-Encoding")
 def test_status_guard(ctx):
     """204 and 304 have no body to encode, and a 206 body is a byte range whose

@@ -77,6 +77,11 @@ typedef struct {
 
   /* Various state flags. */
 
+  /* 1 if the response headers are still ours to send. Set when the response
+     length is unknown, so that brotli_min_length can be applied once enough
+     of the body has been seen to judge it. */
+  unsigned headers_postponed : 1;
+
   /* 1 if encoder is initialized, output chain and buffer are allocated. */
   unsigned initialized : 1;
   /* 1 if compression is finished / failed. */
@@ -124,6 +129,11 @@ static void ngx_http_brotli_filter_free(void* opaque, void* address);
 static void ngx_http_brotli_filter_cleanup(void* data);
 
 static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* r);
+
+/* Commits the postponed response headers, compressing or not. */
+static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t* r,
+                                                     ngx_http_brotli_ctx_t* ctx,
+                                                     ngx_uint_t compress);
 
 static ngx_int_t ngx_http_brotli_add_variables(ngx_conf_t* cf);
 static ngx_int_t ngx_http_brotli_ratio_variable(ngx_http_request_t* r,
@@ -227,7 +237,6 @@ static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
 
 /* Process headers and decide if request is eligible for brotli compression. */
 static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
-  ngx_table_elt_t* h;
   ngx_http_brotli_ctx_t* ctx;
   ngx_http_brotli_conf_t* conf;
 
@@ -293,8 +302,40 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
   ctx->content_length = r->headers_out.content_length_n;
   ngx_http_set_ctx(r, ctx, ngx_http_brotli_filter_module);
 
-  /* Prepare response headers, so that following filters in the chain will
-     notice that response body is compressed. */
+  r->main_filter_need_in_memory = 1;
+
+  /* When the length is unknown there is nothing yet to compare against
+     brotli_min_length, and committing the headers here would settle the
+     question for good. Hold them instead: the body filter sends them as soon
+     as it has seen enough of the body to decide, which takes only
+     brotli_min_length bytes rather than the whole response. */
+  if (ctx->content_length < 0) {
+    ctx->headers_postponed = 1;
+    return NGX_OK;
+  }
+
+  return ngx_http_brotli_filter_send_headers(r, ctx, 1);
+}
+
+/* Commits headers that ngx_http_brotli_header_filter held back. With
+   "compress" set the response is labelled and the encoder will run; without
+   it the response passes through untouched, and gzip - suppressed earlier so
+   that Brotli would win - is allowed to reconsider. */
+static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t* r,
+                                                     ngx_http_brotli_ctx_t* ctx,
+                                                     ngx_uint_t compress) {
+  ngx_table_elt_t* h;
+
+  ctx->headers_postponed = 0;
+
+  if (!compress) {
+    ctx->closed = 1;
+    r->gzip_tested = 0;
+    r->gzip_ok = 0;
+    return ngx_http_next_header_filter(r);
+  }
+
+  /* Tell the filters below that the body is compressed. */
   h = ngx_list_push(&r->headers_out.headers);
   if (h == NULL) {
     return NGX_ERROR;
@@ -308,8 +349,6 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
   ngx_str_set(&h->value, "br");
   r->headers_out.content_encoding = h;
 
-  r->main_filter_need_in_memory = 1;
-
   ngx_http_clear_content_length(r);
   ngx_http_clear_accept_ranges(r);
   ngx_http_weak_etag(r);
@@ -320,8 +359,9 @@ static ngx_int_t ngx_http_brotli_header_filter(ngx_http_request_t* r) {
 /* Response body filtration (compression). */
 static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
                                              ngx_chain_t* in) {
-  int rc;
+  ngx_int_t rc;
   ngx_http_brotli_ctx_t* ctx;
+  ngx_http_brotli_conf_t* conf;
   size_t available_output;
   ptrdiff_t available_busy_output;
   size_t input_size;
@@ -350,6 +390,51 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       return NGX_ERROR;
     }
     r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+  }
+
+  /* Headers held back because the length was unknown. Decide as soon as the
+     body answers the only question brotli_min_length asks - is it at least
+     that big - which needs min_length bytes, not the whole response, so this
+     costs no meaningful latency. A flush marker means something downstream is
+     waiting, so decide immediately and compress, since the total is still
+     unknown. */
+  if (ctx->headers_postponed) {
+    size_t pending;
+    ngx_uint_t complete;
+    ngx_uint_t urgent;
+    ngx_uint_t compress;
+
+    conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
+    pending = ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
+
+    if (complete) {
+      /* Whole response in hand, so the comparison is exact. */
+      compress = (pending >= (size_t)conf->min_length);
+    } else if (urgent || pending >= (size_t)conf->min_length) {
+      compress = 1;
+    } else {
+      /* Too little to judge, and nothing waiting on it. */
+      return NGX_OK;
+    }
+
+    rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
+    if (rc == NGX_ERROR) {
+      ngx_http_brotli_filter_close(ctx);
+      return NGX_ERROR;
+    }
+
+    if (!compress) {
+      /* Pass the held input through untouched; ctx->closed makes every later
+         call a straight hand-off. */
+      link = ctx->in;
+      ctx->in = NULL;
+      r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+      return ngx_http_next_body_filter(r, link);
+    }
+
+    if (rc > NGX_OK) {
+      return rc;
+    }
   }
 
   /* Choosing the encoder window costs memory that scales with the window, so
