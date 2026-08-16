@@ -771,11 +771,64 @@ static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
    frequent short-lived sub-page allocations (e.g. one per meta-block), and
    ngx_pfree only reclaims "large" blocks, so pool-backed ones would pile up
    until the request ends. "opaque" is still the pool, but only for logging. */
+/* Per-worker cache of encoder allocations.
+ *
+ * Brotli asks for the same handful of sizes on every request and hands them
+ * all back when the encoder is destroyed, so the same blocks can serve the
+ * next request instead of going back to the allocator. Workers are
+ * single-threaded, so no locking is needed.
+ *
+ * Brotli's free callback is given only an address, so each block carries its
+ * size in a header. The header is a full alignment unit rather than a bare
+ * size_t, to keep the address handed out as aligned as the allocator's own -
+ * the SIMD hashers care.
+ */
+#define NGX_HTTP_BROTLI_CACHE_SLOTS 24
+/* One request's working set at the shipped defaults is under 2 MB, so this is
+   ample; the cache is only ever filled by blocks a finished request handed
+   back. It bounds what a worker retains when responses are much larger. */
+#define NGX_HTTP_BROTLI_CACHE_MAX_BYTES (4 * 1024 * 1024)
+#define NGX_HTTP_BROTLI_BLOCK_HEADER 16
+
+typedef struct {
+  u_char* block; /* NULL when the slot is empty */
+  size_t size;   /* payload size, excluding the header */
+} ngx_http_brotli_cached_block_t;
+
+static ngx_http_brotli_cached_block_t
+    ngx_http_brotli_cache[NGX_HTTP_BROTLI_CACHE_SLOTS];
+static size_t ngx_http_brotli_cache_bytes;
+
 static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size) {
   ngx_pool_t* pool = opaque;
+  u_char* block;
+  ngx_uint_t i;
   void* p;
 
-  p = ngx_alloc(size, pool->log);
+  /* Exact-size reuse only. Brotli's sizes are a function of the encoder
+     parameters, so they repeat; accepting a larger block instead would
+     strand the difference. */
+  block = NULL;
+
+  for (i = 0; i < NGX_HTTP_BROTLI_CACHE_SLOTS; i++) {
+    if (ngx_http_brotli_cache[i].block != NULL &&
+        ngx_http_brotli_cache[i].size == size) {
+      block = ngx_http_brotli_cache[i].block;
+      ngx_http_brotli_cache[i].block = NULL;
+      ngx_http_brotli_cache_bytes -= size;
+      break;
+    }
+  }
+
+  if (block == NULL) {
+    block = ngx_alloc(size + NGX_HTTP_BROTLI_BLOCK_HEADER, pool->log);
+    if (block == NULL) {
+      return NULL;
+    }
+    *(size_t*)block = size;
+  }
+
+  p = block + NGX_HTTP_BROTLI_BLOCK_HEADER;
 
 #if (NGX_DEBUG)
   ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pool->log, 0, "brotli alloc: %p, size:%uz",
@@ -786,13 +839,35 @@ static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size) {
 }
 
 static void ngx_http_brotli_filter_free(void* opaque, void* address) {
+  u_char* block;
+  size_t size;
+  ngx_uint_t i;
+
 #if (NGX_DEBUG)
   ngx_pool_t* pool = opaque;
 
   ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pool->log, 0, "brotli free: %p", address);
 #endif
 
-  ngx_free(address);
+  if (address == NULL) {
+    return;
+  }
+
+  block = (u_char*)address - NGX_HTTP_BROTLI_BLOCK_HEADER;
+  size = *(size_t*)block;
+
+  if (ngx_http_brotli_cache_bytes + size <= NGX_HTTP_BROTLI_CACHE_MAX_BYTES) {
+    for (i = 0; i < NGX_HTTP_BROTLI_CACHE_SLOTS; i++) {
+      if (ngx_http_brotli_cache[i].block == NULL) {
+        ngx_http_brotli_cache[i].block = block;
+        ngx_http_brotli_cache[i].size = size;
+        ngx_http_brotli_cache_bytes += size;
+        return;
+      }
+    }
+  }
+
+  ngx_free(block);
 }
 
 static void ngx_http_brotli_filter_cleanup(void* data) {
