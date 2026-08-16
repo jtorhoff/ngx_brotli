@@ -1,0 +1,15 @@
+# Formatting for this project's own sources: common/, filter/, static/.
+#
+# The tree was already written in Google style, so basing on it is a no-op
+# rather than a reformat. The one deliberate addition is InsertBraces, which
+# keeps braces on single-statement if/while/for bodies.
+#
+# InsertBraces requires clang-format 15 or newer. On an older version the
+# option is ignored with a warning and the rest of the style still applies.
+#
+# Caveat: clang-format searches upwards from the file it is formatting, so
+# this file also covers deps/brotli. That is a vendored submodule with its
+# own conventions - do not reformat anything under deps/.
+---
+BasedOnStyle: Google
+InsertBraces: true

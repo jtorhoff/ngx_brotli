@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.cc }} / ${{ matrix.nginx }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One compiler or nginx version failing should not hide the others.
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        nginx: [release-1.30.4]
+
+    env:
+      CC: ${{ matrix.cc }}
+      NGINX_REF: ${{ matrix.nginx }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libpcre3-dev zlib1g-dev
+
+      - name: Build Brotli and nginx
+        run: script/build.sh
+
+      - name: Prepare fixtures
+        run: script/prepare-tests.sh
+
+      - name: Static files and Accept-Encoding
+        run: script/run-tests.sh
+
+      - name: Streaming responses and encoder lifetime
+        run: python3 script/test_stream.py --nginx nginx/objs/nginx
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          for log in script/test/logs/*.log script/test/*.log; do
+            [ -s "$log" ] || continue
+            echo "===== $log"
+            tail -n 100 "$log"
+          done
+
+  sanitizers:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libpcre3-dev zlib1g-dev
+
+      - name: Build Brotli
+        run: |
+          cmake -S deps/brotli -B deps/brotli/out \
+                -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake --build deps/brotli/out --target brotli -j "$(nproc)"
+
+      - name: Build nginx with AddressSanitizer
+        run: |
+          git clone --depth 1 --branch release-1.30.4 \
+              https://github.com/nginx/nginx.git nginx
+          cd nginx
+          ./auto/configure \
+              --prefix="$GITHUB_WORKSPACE/script/test" \
+              --with-http_v2_module \
+              --with-debug \
+              --with-cc-opt="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+              --with-ld-opt="-fsanitize=address" \
+              --add-module="$GITHUB_WORKSPACE"
+          make -j "$(nproc)"
+
+      - name: Streaming suite under AddressSanitizer
+        # Leaks are nginx's pools rather than anything this module owns, and
+        # the module's own balance is asserted by the suite itself.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: python3 script/test_stream.py --nginx nginx/objs/nginx
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+
+      - name: Check formatting
+        run: |
+          # .clang-format sets InsertBraces, which needs clang-format 15 or
+          # newer; an older one rejects the key outright rather than ignoring it.
+          clang-format --version
+          # deps/ is vendored and formats to its own conventions.
+          clang-format --dry-run --Werror \
+            module/common/*.h module/filter/*.c module/static/*.c

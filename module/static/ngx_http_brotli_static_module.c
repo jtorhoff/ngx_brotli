@@ -9,6 +9,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include "../common/ngx_http_brotli_accept_encoding.h"
+
 /* >> Configuration */
 
 #define NGX_HTTP_BROTLI_STATIC_OFF 0
@@ -77,69 +79,8 @@ ngx_module_t ngx_http_brotli_static_module = {
 /* << Module definition*/
 
 static const u_char kContentEncoding[] = "Content-Encoding";
-static /* const */ char kEncoding[] = "br";
-static const size_t kEncodingLen = 2;
 static /* const */ u_char kSuffix[] = ".br";
 static const size_t kSuffixLen = 3;
-
-static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
-  ngx_table_elt_t* accept_encoding_entry;
-  ngx_str_t* accept_encoding;
-  u_char* cursor;
-  u_char* end;
-  u_char before;
-  u_char after;
-
-  accept_encoding_entry = req->headers_in.accept_encoding;
-  if (accept_encoding_entry == NULL) return NGX_DECLINED;
-  accept_encoding = &accept_encoding_entry->value;
-
-  cursor = accept_encoding->data;
-  end = cursor + accept_encoding->len;
-  while (1) {
-    u_char digit;
-    /* It would be an idiotic idea to rely on compiler to produce performant
-       binary, that is why we just do -1 at every call site. */
-    cursor = ngx_strcasestrn(cursor, kEncoding, kEncodingLen - 1);
-    if (cursor == NULL) return NGX_DECLINED;
-    before = (cursor == accept_encoding->data) ? ' ' : cursor[-1];
-    cursor += kEncodingLen;
-    after = (cursor >= end) ? ' ' : *cursor;
-    if (before != ',' && before != ' ') continue;
-    if (after != ',' && after != ' ' && after != ';') continue;
-
-    /* Check for ";q=0[.[0[0[0]]]]" */
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != ';') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != 'q') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != '=') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != '0') break;
-    if (*(cursor++) != '.') return NGX_DECLINED; /* ;q=0, */
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0., */
-    if (digit > '0') break;
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0.0, */
-    if (digit > '0') break;
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0.00, */
-    if (digit > '0') break;
-    return NGX_DECLINED; /* ;q=0.000 */
-  }
-  return NGX_OK;
-}
-
-/* Test if this request is allowed to have the brotli response. */
-static ngx_int_t check_eligility(ngx_http_request_t* req) {
-  if (req != req->main) return NGX_DECLINED;
-  if (check_accept_encoding(req) != NGX_OK) return NGX_DECLINED;
-  req->gzip_tested = 1;
-  req->gzip_ok = 0;
-  return NGX_OK;
-}
 
 static ngx_int_t handler(ngx_http_request_t* req) {
   configuration_t* cfg;
@@ -155,27 +96,37 @@ static ngx_int_t handler(ngx_http_request_t* req) {
   ngx_chain_t out;
 
   /* Only GET and HEAD requensts are supported. */
-  if (!(req->method & (NGX_HTTP_GET | NGX_HTTP_HEAD))) return NGX_DECLINED;
+  if (!(req->method & (NGX_HTTP_GET | NGX_HTTP_HEAD))) {
+    return NGX_DECLINED;
+  }
 
   /* Only files are supported. */
-  if (req->uri.data[req->uri.len - 1] == '/') return NGX_DECLINED;
+  if (req->uri.data[req->uri.len - 1] == '/') {
+    return NGX_DECLINED;
+  }
 
   /* Get configuration and check if module is disabled. */
   cfg = ngx_http_get_module_loc_conf(req, ngx_http_brotli_static_module);
-  if (cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) return NGX_DECLINED;
+  if (cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) {
+    return NGX_DECLINED;
+  }
 
   if (cfg->enable == NGX_HTTP_BROTLI_STATIC_ALWAYS) {
     /* Ignore request properties (e.g. Accept-Encoding). */
   } else {
     /* NGX_HTTP_BROTLI_STATIC_ON */
     req->gzip_vary = 1;
-    rc = check_eligility(req);
-    if (rc != NGX_OK) return NGX_DECLINED;
+    rc = ngx_http_brotli_claim_request(req);
+    if (rc != NGX_OK) {
+      return NGX_DECLINED;
+    }
   }
 
   /* Get path and append the suffix. */
   last = ngx_http_map_uri_to_path(req, &path, &root, kSuffixLen);
-  if (last == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (last == NULL) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
   /* +1 for reinstating the terminating 0. */
   ngx_cpystrn(last, kSuffix, kSuffixLen + 1);
   path.len += kSuffixLen;
@@ -194,7 +145,9 @@ static ngx_int_t handler(ngx_http_request_t* req) {
   file_info.errors = location_cfg->open_file_cache_errors;
   file_info.events = location_cfg->open_file_cache_events;
   rc = ngx_http_set_disable_symlinks(req, location_cfg, &path, &file_info);
-  if (rc != NGX_OK) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (rc != NGX_OK) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
 
   /* Try to fetch file and process errors. */
   rc = ngx_open_cached_file(location_cfg->open_file_cache, &path, &file_info,
@@ -247,36 +200,56 @@ static ngx_int_t handler(ngx_http_request_t* req) {
   /* Prepare request push the body. */
   req->root_tested = !req->error_page;
   rc = ngx_http_discard_request_body(req);
-  if (rc != NGX_OK) return rc;
+  if (rc != NGX_OK) {
+    return rc;
+  }
   log->action = "sending response to client";
   req->headers_out.status = NGX_HTTP_OK;
   req->headers_out.content_length_n = file_info.size;
   req->headers_out.last_modified_time = file_info.mtime;
   rc = ngx_http_set_etag(req);
-  if (rc != NGX_OK) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (rc != NGX_OK) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
   rc = ngx_http_set_content_type(req);
-  if (rc != NGX_OK) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (rc != NGX_OK) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
 
   /* Set "Content-Encoding" header. */
   content_encoding_entry = ngx_list_push(&req->headers_out.headers);
-  if (content_encoding_entry == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (content_encoding_entry == NULL) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
   content_encoding_entry->hash = 1;
 #if nginx_version >= 1023000
   content_encoding_entry->next = NULL;
 #endif
   ngx_str_set(&content_encoding_entry->key, kContentEncoding);
-  ngx_str_set(&content_encoding_entry->value, kEncoding);
+  ngx_str_set(&content_encoding_entry->value, ngx_http_brotli_encoding);
   req->headers_out.content_encoding = content_encoding_entry;
 
   /* Setup response body. */
   buf = ngx_pcalloc(req->pool, sizeof(ngx_buf_t));
-  if (buf == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (buf == NULL) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
   buf->file = ngx_pcalloc(req->pool, sizeof(ngx_file_t));
-  if (buf->file == NULL) return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  if (buf->file == NULL) {
+    return NGX_HTTP_INTERNAL_SERVER_ERROR;
+  }
   buf->file_pos = 0;
   buf->file_last = file_info.size;
-  buf->in_file = buf->file_last ? 1 : 0;
-  buf->last_buf = (req == req->main) ? 1 : 0;
+  if (buf->file_last) {
+    buf->in_file = 1;
+  } else {
+    buf->in_file = 0;
+  }
+  if (req == req->main) {
+    buf->last_buf = 1;
+  } else {
+    buf->last_buf = 0;
+  }
   buf->last_in_chain = 1;
   buf->file->fd = file_info.fd;
   buf->file->name = path;
@@ -298,7 +271,9 @@ static ngx_int_t handler(ngx_http_request_t* req) {
 static void* create_conf(ngx_conf_t* root_cfg) {
   configuration_t* cfg;
   cfg = ngx_palloc(root_cfg->pool, sizeof(configuration_t));
-  if (cfg == NULL) return NULL;
+  if (cfg == NULL) {
+    return NULL;
+  }
   cfg->enable = NGX_CONF_UNSET_UINT;
   return cfg;
 }
@@ -317,7 +292,9 @@ static ngx_int_t init(ngx_conf_t* root_cfg) {
   core_cfg = ngx_http_conf_get_module_main_conf(root_cfg, ngx_http_core_module);
   handler_slot =
       ngx_array_push(&core_cfg->phases[NGX_HTTP_CONTENT_PHASE].handlers);
-  if (handler_slot == NULL) return NGX_ERROR;
+  if (handler_slot == NULL) {
+    return NGX_ERROR;
+  }
   *handler_slot = handler;
   return NGX_OK;
 }

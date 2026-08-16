@@ -1,18 +1,40 @@
 #!/bin/bash
+#
+# Static-file and Accept-Encoding suite, over HTTP/1.1 and HTTP/2.
+# Run script/build.sh and script/prepare-tests.sh first.
+#
+# Overridable:
+#   NGINX_BIN  nginx binary to exercise (default: the one script/build.sh makes)
+#   BROTLI     brotli CLI used to decompress (default: the one it makes, else PATH)
+#
+# Note NGINX_BIN rather than NGINX: nginx reserves the NGINX environment
+# variable for socket inheritance, and reads a binary path there as a list of
+# socket numbers.
+#
+# Exits with the number of failed tests.
 
-# Setup shortcuts.
-ROOT=`pwd`
-NGINX=$ROOT/nginx/objs/nginx
-BROTLI=$ROOT/deps/brotli/out/brotli
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NGINX="${NGINX_BIN:-$ROOT/nginx/objs/nginx}"
+BROTLI="${BROTLI:-$ROOT/deps/brotli/out/brotli}"
 SERVER=http://localhost:8080
 FILES=$ROOT/script/test
 HR="---------------------------------------------------------------------------"
 
-if [ ! -d tmp ]; then
-  mkdir tmp
+if [ ! -x "$NGINX" ]; then
+  echo "no nginx at $NGINX; run script/build.sh or set NGINX" >&2
+  exit 1
+fi
+if [ ! -x "$BROTLI" ]; then
+  BROTLI="$(command -v brotli || true)"
+fi
+if [ -z "$BROTLI" ] || [ ! -x "$BROTLI" ]; then
+  echo "no brotli CLI; run script/build.sh or set BROTLI" >&2
+  exit 1
 fi
 
-rm tmp/*
+cd "$ROOT"
+mkdir -p tmp
+rm -f tmp/*
 
 add_result() {
   echo $1 >&2
@@ -50,8 +72,8 @@ expect_br_equal() {
 ################################################################################
 
 # Start default server.
-echo "Statring NGINX"
-$NGINX -c $ROOT/script/test.conf
+echo "Starting NGINX"
+$NGINX -p $FILES -c $ROOT/script/test.conf
 # Fetch vanilla 404 response.
 curl -s -o tmp/notfound.txt $SERVER/notfound
 
@@ -123,13 +145,13 @@ expect_equal $FILES/small.html tmp/ae-13.txt
 echo $HR
 echo "Stopping default NGINX"
 # Stop server.
-$NGINX -c $ROOT/script/test.conf -s stop
+$NGINX -p $FILES -c $ROOT/script/test.conf -s stop
 
 ################################################################################
 
 # Start default server.
-echo "Statring h2 NGINX"
-$NGINX -c $ROOT/script/test_h2.conf
+echo "Starting h2 NGINX"
+$NGINX -p $FILES -c $ROOT/script/test_h2.conf
 
 CURL="curl --http2-prior-knowledge -s"
 
@@ -151,14 +173,14 @@ expect_equal $FILES/small.html tmp/h2-ae-13.txt
 echo $HR
 echo "Stopping h2 NGINX"
 # Stop server.
-$NGINX -c $ROOT/script/test_h2.conf -s stop
+$NGINX -p $FILES -c $ROOT/script/test_h2.conf -s stop
 
 ################################################################################
 
 # Report.
 
-FAILED=$(get_failed $STATUS)
-COUNT=$(get_count $STATUS)
+FAILED=$(get_failed)
+COUNT=$(get_count)
 echo $HR
 echo "Results: $FAILED of $COUNT tests failed"
 
