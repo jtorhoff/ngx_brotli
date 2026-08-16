@@ -695,7 +695,7 @@ def test_ttfb_on_buffered_stream(ctx):
         sock.close()
 
     check(first_body is not None, "no body ever arrived")
-    ttfb = first_body - started
+    ttfb = first_body - started  # type: ignore
     elapsed = finished - started
     check(
         ttfb < elapsed * 0.4,
