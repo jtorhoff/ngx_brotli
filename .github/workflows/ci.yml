@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.cc }}
+    name: Build with ${{ matrix.cc }}
     runs-on: ubuntu-latest
     strategy:
       # One compiler failing should not hide the other.
@@ -57,7 +57,7 @@ jobs:
           done
 
   sanitizers:
-    name: AddressSanitizer
+    name: Run tests with address sanitizer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
         run: python3 script/test_stream.py --nginx nginx/objs/nginx
 
   format:
-    name: clang-format
+    name: Check formatting with clang-format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
