@@ -422,6 +422,11 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       ngx_http_brotli_filter_close(ctx);
       return NGX_ERROR;
     }
+    /* A special response was substituted below us; the body we hold is no
+       longer the one being sent. Must be checked before handing anything on. */
+    if (rc > NGX_OK) {
+      return rc;
+    }
 
     if (!compress) {
       /* Pass the held input through untouched; ctx->closed makes every later
@@ -430,10 +435,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       ctx->in = NULL;
       r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
       return ngx_http_next_body_filter(r, link);
-    }
-
-    if (rc > NGX_OK) {
-      return rc;
     }
   }
 
@@ -821,6 +822,11 @@ static void* ngx_http_brotli_filter_alloc(void* opaque, size_t size) {
   }
 
   if (block == NULL) {
+    /* Refuse a size that would wrap when the header is added, rather than
+       allocating short and overflowing it. */
+    if (size > NGX_MAX_SIZE_T_VALUE - NGX_HTTP_BROTLI_BLOCK_HEADER) {
+      return NULL;
+    }
     block = ngx_alloc(size + NGX_HTTP_BROTLI_BLOCK_HEADER, pool->log);
     if (block == NULL) {
       return NULL;
