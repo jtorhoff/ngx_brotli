@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  NGINX_REF: stable-1.30
+
 on:
   push:
     branches: ["**"]
@@ -11,18 +14,16 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.cc }} / ${{ matrix.nginx }}
+    name: ${{ matrix.cc }}
     runs-on: ubuntu-latest
     strategy:
-      # One compiler or nginx version failing should not hide the others.
+      # One compiler failing should not hide the other.
       fail-fast: false
       matrix:
         cc: [gcc, clang]
-        nginx: [stable-1.30]
 
     env:
       CC: ${{ matrix.cc }}
-      NGINX_REF: ${{ matrix.nginx }}
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +77,7 @@ jobs:
 
       - name: Build nginx with AddressSanitizer
         run: |
-          git clone --depth 1 --branch release-1.30.4 \
+          git clone --depth 1 --branch $NGINX_REF \
               https://github.com/nginx/nginx.git nginx
           cd nginx
           ./auto/configure \
