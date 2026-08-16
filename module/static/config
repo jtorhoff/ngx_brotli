@@ -23,7 +23,7 @@
 # SUCH DAMAGE.
 
 if [ "$ngx_addon_name" = "ngx_brotli" ]; then
-  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir/static"
+  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir/module/static"
 else
   BROTLI_MODULE_SRC_DIR="$ngx_addon_dir"
 fi

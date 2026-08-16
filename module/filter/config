@@ -22,10 +22,16 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+# Either the repository root was added as the module (the top-level config
+# sources this, having set ngx_addon_name), or this directory was added
+# directly. BROTLI_ROOT_DIR has to reach the repository root either way, since
+# the Brotli submodule lives there rather than beside the sources.
 if [ "$ngx_addon_name" = "ngx_brotli" ]; then
-  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir/filter"
+  BROTLI_MODULE_SRC_DIR="$ngx_addon_dir/module/filter"
+  BROTLI_ROOT_DIR="$ngx_addon_dir"
 else
   BROTLI_MODULE_SRC_DIR="$ngx_addon_dir"
+  BROTLI_ROOT_DIR="$ngx_addon_dir/../.."
 fi
 
 ngx_addon_name=ngx_brotli_filter
@@ -42,7 +48,7 @@ fi
 ngx_module_type=HTTP_FILTER
 ngx_module_name=ngx_http_brotli_filter_module
 
-brotli="$ngx_addon_dir/deps/brotli/c"
+brotli="$BROTLI_ROOT_DIR/deps/brotli/c"
 if [ ! -f "$brotli/include/brotli/encode.h" ]; then
 cat << END
 
@@ -51,7 +57,7 @@ Brotli library is missing from the $brotli directory.
 
 Please make sure that the git submodule has been checked out:
 
-    cd $ngx_addon_dir && git submodule update --init && cd $PWD
+    cd $BROTLI_ROOT_DIR && git submodule update --init && cd $PWD
 
 END
     exit 1
