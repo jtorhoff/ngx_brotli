@@ -222,9 +222,55 @@ static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
 static /* const */ char kEncoding[] = "br";
 static const size_t kEncodingLen = 2;
 
+/* Optional whitespace, as RFC 9110 defines it for list separators. */
+#define ngx_http_brotli_is_ows(c) ((c) == ' ' || (c) == '\t')
+
+static u_char* skip_ows(u_char* cursor, u_char* end) {
+  while (cursor < end && ngx_http_brotli_is_ows(*cursor)) cursor++;
+  return cursor;
+}
+
+/* Given the text following an encoding token, reports whether its parameters
+   set the quality to zero, i.e. ";q=0", ";q=0.0", ";q=0.00" or ";q=0.000".
+   Anything else - a different weight, an unrecognised parameter, no
+   parameters at all - counts as acceptable. */
+static ngx_uint_t is_zero_weighted(u_char* cursor, u_char* end) {
+  ngx_uint_t digits;
+
+  cursor = skip_ows(cursor, end);
+  if (cursor == end || *cursor++ != ';') return 0;
+  cursor = skip_ows(cursor, end);
+  if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) return 0;
+  cursor++;
+  cursor = skip_ows(cursor, end);
+  if (cursor == end || *cursor++ != '=') return 0;
+  cursor = skip_ows(cursor, end);
+  /* Any weight not starting with "0" is non-zero. */
+  if (cursor == end || *cursor++ != '0') return 0;
+  /* "q=0" with nothing after it, or with no fraction. */
+  if (cursor == end || *cursor != '.') return 1;
+  cursor++;
+  /* RFC 9110 permits at most three digits after the point. */
+  for (digits = 0; digits < 3; digits++) {
+    if (cursor == end) return 1;              /* "q=0." */
+    if (*cursor < '0' || *cursor > '9') return 1;
+    if (*cursor > '0') return 0;               /* a non-zero digit */
+    cursor++;
+  }
+  return 1;
+}
+
+/* Decides whether the client will accept Brotli.
+
+   "br" is taken whenever it appears as a token in Accept-Encoding, whatever
+   weight it carries, with the single exception of an explicit zero - which
+   RFC 9110 defines as "not acceptable". Relative weights are deliberately
+   ignored, so "gzip;q=1.0, br;q=0.1" still selects Brotli. Choosing Brotli
+   then suppresses gzip for the request, in ngx_http_brotli_check_request. */
 static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
   ngx_table_elt_t* accept_encoding_entry;
   ngx_str_t* accept_encoding;
+  u_char* start;
   u_char* cursor;
   u_char* end;
   u_char before;
@@ -236,42 +282,29 @@ static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
 
   if (accept_encoding->len < kEncodingLen) return NGX_DECLINED;
 
-  cursor = accept_encoding->data;
-  end = cursor + accept_encoding->len;
-  while (1) {
-    u_char digit;
-    /* It would be an idiotic idea to rely on compiler to produce performant
-       binary, that is why we just do -1 at every call site. */
-    cursor = ngx_strcasestrn(cursor, kEncoding, kEncodingLen - 1);
-    if (cursor == NULL) return NGX_DECLINED;
-    before = (cursor == accept_encoding->data) ? ' ' : cursor[-1];
-    cursor += kEncodingLen;
-    after = (cursor >= end) ? ' ' : *cursor;
-    if (before != ',' && before != ' ') continue;
-    if (after != ',' && after != ' ' && after != ';') continue;
+  start = accept_encoding->data;
+  end = start + accept_encoding->len;
+  cursor = start;
 
-    /* Check for ";q=0[.[0[0[0]]]]" */
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != ';') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != 'q') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != '=') break;
-    while (*cursor == ' ') cursor++;
-    if (*(cursor++) != '0') break;
-    if (*(cursor++) != '.') return NGX_DECLINED; /* ;q=0, */
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0., */
-    if (digit > '0') break;
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0.0, */
-    if (digit > '0') break;
-    digit = *(cursor++);
-    if (digit < '0' || digit > '9') return NGX_DECLINED; /* ;q=0.00, */
-    if (digit > '0') break;
-    return NGX_DECLINED; /* ;q=0.000 */
+  for (;;) {
+    /* Bounded search, so a header without a terminating NUL can not be run
+       off the end of. */
+    cursor = ngx_strlcasestrn(cursor, end, (u_char*)kEncoding, kEncodingLen - 1);
+    if (cursor == NULL) return NGX_DECLINED;
+
+    /* "br" has to stand alone as a token; reject a match inside a longer one
+       such as "brotli" or "x-br". A match at either edge of the header is
+       treated as if a separator sat beside it. */
+    before = (cursor == start) ? ',' : cursor[-1];
+    cursor += kEncodingLen;
+    after = (cursor == end) ? ',' : *cursor;
+
+    if (before != ',' && !ngx_http_brotli_is_ows(before)) continue;
+    if (after != ',' && after != ';' && !ngx_http_brotli_is_ows(after)) continue;
+
+    if (is_zero_weighted(cursor, end)) return NGX_DECLINED;
+    return NGX_OK;
   }
-  return NGX_OK;
 }
 
 /* Process headers and decide if request is eligible for brotli compression. */

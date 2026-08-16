@@ -694,7 +694,15 @@ def test_no_accept_encoding(ctx):
 
 @test("Accept-Encoding: br;q=0 is honoured")
 def test_q_zero(ctx):
-    for value in ["br;q=0", "br;q=0.0", "br;q=0.000", "br ; q = 0.00"]:
+    for value in [
+        "br;q=0",
+        "br;q=0.0",
+        "br;q=0.00",
+        "br;q=0.000",
+        "br ; q = 0.00",
+        "br\t;\tq\t=\t0",
+        "gzip, br;q=0",
+    ]:
         _, headers, _ = fetch(ctx.port, "/big.html", accept_encoding=value)
         check(
             "content-encoding" not in headers,
@@ -704,7 +712,7 @@ def test_q_zero(ctx):
 
 @test("tokens that merely contain 'br' do not select brotli")
 def test_partial_token(ctx):
-    for value in ["bro", "brotli", "bar", "b", "gzip, deflate"]:
+    for value in ["bro", "brotli", "bar", "b", "gzip, deflate", "x-br", "br-x"]:
         _, headers, _ = fetch(ctx.port, "/big.html", accept_encoding=value)
         check(
             "content-encoding" not in headers,
@@ -721,6 +729,17 @@ def test_encoding_lists(ctx):
         "gzip, br;q=1, deflate",
         "br;q=0.001",
         "identity, br",
+        # Relative weights are ignored: naming br at all is enough, even when
+        # something else is weighted higher.
+        "gzip;q=1.0, br;q=0.1",
+        "gzip;q=0.9, br;q=0.2, deflate",
+        # Tab is valid optional whitespace around a list separator.
+        "br\t,gzip",
+        "gzip,\tbr",
+        "gzip, br ",
+        # Token matching is case-insensitive.
+        "BR",
+        "Br",
     ]:
         _, headers, body = fetch(ctx.port, "/small.html", accept_encoding=value)
         check(
