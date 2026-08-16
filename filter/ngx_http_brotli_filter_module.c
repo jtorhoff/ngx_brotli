@@ -223,10 +223,12 @@ static /* const */ char kEncoding[] = "br";
 static const size_t kEncodingLen = 2;
 
 /* Optional whitespace, as RFC 9110 defines it for list separators. */
-#define ngx_http_brotli_is_ows(c) ((c) == ' ' || (c) == '\t')
+#define ngx_http_brotli_is_optional_whitespace(c) ((c) == ' ' || (c) == '\t')
 
-static u_char* skip_ows(u_char* cursor, u_char* end) {
-  while (cursor < end && ngx_http_brotli_is_ows(*cursor)) cursor++;
+static u_char* skip_optional_whitespace(u_char* cursor, u_char* end) {
+  while (cursor < end && ngx_http_brotli_is_optional_whitespace(*cursor)) {
+    cursor++;
+  }
   return cursor;
 }
 
@@ -237,14 +239,14 @@ static u_char* skip_ows(u_char* cursor, u_char* end) {
 static ngx_uint_t is_zero_weighted(u_char* cursor, u_char* end) {
   ngx_uint_t digits;
 
-  cursor = skip_ows(cursor, end);
+  cursor = skip_optional_whitespace(cursor, end);
   if (cursor == end || *cursor++ != ';') return 0;
-  cursor = skip_ows(cursor, end);
+  cursor = skip_optional_whitespace(cursor, end);
   if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) return 0;
   cursor++;
-  cursor = skip_ows(cursor, end);
+  cursor = skip_optional_whitespace(cursor, end);
   if (cursor == end || *cursor++ != '=') return 0;
-  cursor = skip_ows(cursor, end);
+  cursor = skip_optional_whitespace(cursor, end);
   /* Any weight not starting with "0" is non-zero. */
   if (cursor == end || *cursor++ != '0') return 0;
   /* "q=0" with nothing after it, or with no fraction. */
@@ -289,7 +291,8 @@ static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
   for (;;) {
     /* Bounded search, so a header without a terminating NUL can not be run
        off the end of. */
-    cursor = ngx_strlcasestrn(cursor, end, (u_char*)kEncoding, kEncodingLen - 1);
+    cursor =
+        ngx_strlcasestrn(cursor, end, (u_char*)kEncoding, kEncodingLen - 1);
     if (cursor == NULL) return NGX_DECLINED;
 
     /* "br" has to stand alone as a token; reject a match inside a longer one
@@ -299,8 +302,13 @@ static ngx_int_t check_accept_encoding(ngx_http_request_t* req) {
     cursor += kEncodingLen;
     after = (cursor == end) ? ',' : *cursor;
 
-    if (before != ',' && !ngx_http_brotli_is_ows(before)) continue;
-    if (after != ',' && after != ';' && !ngx_http_brotli_is_ows(after)) continue;
+    if (before != ',' && !ngx_http_brotli_is_optional_whitespace(before)) {
+      continue;
+    }
+    if (after != ',' && after != ';' &&
+        !ngx_http_brotli_is_optional_whitespace(after)) {
+      continue;
+    }
 
     if (is_zero_weighted(cursor, end)) return NGX_DECLINED;
     return NGX_OK;
