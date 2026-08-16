@@ -9,7 +9,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../ngx_http_brotli_accept_encoding.h"
+#include "../common/ngx_http_brotli_accept_encoding.h"
 
 /* >> Configuration */
 

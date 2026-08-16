@@ -62,9 +62,13 @@ BROTLI_ENC_H="$brotli/include/brotli/encode.h \
               $brotli/include/brotli/port.h \
               $brotli/include/brotli/types.h"
 
+# Shared with the static module. Listed as a dependency so that editing it
+# actually rebuilds this module.
+BROTLI_COMMON_H="$BROTLI_MODULE_SRC_DIR/../common/ngx_http_brotli_accept_encoding.h"
+
 
 ngx_module_incs="$brotli/include"
-ngx_module_deps="$BROTLI_ENC_H"
+ngx_module_deps="$BROTLI_ENC_H $BROTLI_COMMON_H"
 ngx_module_srcs="$BROTLI_MODULE_SRC_DIR/ngx_http_brotli_filter_module.c"
 ngx_module_libs="-L$BROTLI_OUTPUT_DIRECTORY -lbrotlienc -lbrotlicommon -lm"
 ngx_module_order="$ngx_module_name \

@@ -8,7 +8,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../ngx_http_brotli_accept_encoding.h"
+#include "../common/ngx_http_brotli_accept_encoding.h"
 
 #if (NGX_HAVE_BROTLI_ENC_ENCODE_H)
 #include <brotli/enc/encode.h>
