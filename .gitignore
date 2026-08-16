@@ -1,2 +1,3 @@
-deps/
+# Build output from the vendored Brotli; the submodule itself is tracked.
+deps/brotli/out/
 .vscode/
