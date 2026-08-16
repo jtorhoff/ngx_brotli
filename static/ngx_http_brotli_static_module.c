@@ -253,8 +253,16 @@ static ngx_int_t handler(ngx_http_request_t* req) {
   }
   buf->file_pos = 0;
   buf->file_last = file_info.size;
-  buf->in_file = buf->file_last ? 1 : 0;
-  buf->last_buf = (req == req->main) ? 1 : 0;
+  if (buf->file_last) {
+    buf->in_file = 1;
+  } else {
+    buf->in_file = 0;
+  }
+  if (req == req->main) {
+    buf->last_buf = 1;
+  } else {
+    buf->last_buf = 0;
+  }
   buf->last_in_chain = 1;
   buf->file->fd = file_info.fd;
   buf->file->name = path;

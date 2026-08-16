@@ -128,9 +128,17 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
     /* "br" has to stand alone as a token; reject a match inside a longer one
        such as "brotli" or "x-br". A match at either edge of the header is
        treated as if a separator sat beside it. */
-    before = (cursor == start) ? ',' : cursor[-1];
+    if (cursor == start) {
+      before = ',';
+    } else {
+      before = cursor[-1];
+    }
     cursor += ngx_http_brotli_encoding_len;
-    after = (cursor == end) ? ',' : *cursor;
+    if (cursor == end) {
+      after = ',';
+    } else {
+      after = *cursor;
+    }
 
     if (before != ',' && !ngx_http_brotli_is_optional_whitespace(before)) {
       continue;

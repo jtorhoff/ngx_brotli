@@ -327,6 +327,8 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
   BROTLI_BOOL ok;
   u_char* out;
   ngx_chain_t* link;
+  ngx_chain_t* to_send;
+  BrotliEncoderOperation operation;
 
   ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
 
@@ -393,8 +395,13 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
         available_busy_output = 0;
       }
 
-      rc = ngx_http_next_body_filter(r,
-                                     ctx->output_ready ? ctx->out_chain : NULL);
+      if (ctx->output_ready) {
+        to_send = ctx->out_chain;
+      } else {
+        to_send = NULL;
+      }
+
+      rc = ngx_http_next_body_filter(r, to_send);
       if (ctx->output_ready) {
         ctx->output_ready = 0;
         ctx->output_busy = 1;
@@ -495,12 +502,17 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     available_input = input_size;
     next_input_byte = (const uint8_t*)ctx->in->buf->pos;
     available_output = 0;
-    ok = BrotliEncoderCompressStream(
-        ctx->encoder,
-        ctx->in->buf->last_buf ? BROTLI_OPERATION_FINISH
-        : ctx->in->buf->flush  ? BROTLI_OPERATION_FLUSH
-                               : BROTLI_OPERATION_PROCESS,
-        &available_input, &next_input_byte, &available_output, NULL, NULL);
+    if (ctx->in->buf->last_buf) {
+      operation = BROTLI_OPERATION_FINISH;
+    } else if (ctx->in->buf->flush) {
+      operation = BROTLI_OPERATION_FLUSH;
+    } else {
+      operation = BROTLI_OPERATION_PROCESS;
+    }
+
+    ok = BrotliEncoderCompressStream(ctx->encoder, operation, &available_input,
+                                     &next_input_byte, &available_output, NULL,
+                                     NULL);
     r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     if (!ok) {
       ngx_http_brotli_filter_close(ctx);
