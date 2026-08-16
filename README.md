@@ -125,6 +125,38 @@ Responses of any status are compressed, with the exception of those that carry
 no body (`1xx`, `204`, `304`) or whose body is a byte range (`206`), since
 labelling those with a `Content-Encoding` would corrupt the response.
 
+#### Relationship to gzip, and what this module does not check
+
+When this module takes a response it disables gzip for that request, so a
+client advertising both encodings receives Brotli whatever relative weights it
+gave them - `gzip;q=1.0, br;q=0.1` still yields Brotli.
+
+The consequence is easy to miss: **nginx's own compression controls do not
+apply to Brotli, and suppressing gzip takes them out of play for that request
+too.** This module decides using only `Accept-Encoding`, `brotli_types`,
+`brotli_min_length` and the response status. In particular none of these have
+any effect on it:
+
+- `gzip_http_version`, which defaults to `1.1`. gzip declines to compress for
+  an HTTP/1.0 client; Brotli compresses for one.
+- `gzip_proxied`, which for requests arriving with a `Via` header can be told
+  to leave alone responses carrying `Authorization`, `Cache-Control: no-cache`,
+  `no-store` or `private`, `Expires`, `Last-Modified` or `ETag`. There is no
+  `brotli_proxied`.
+- `gzip_disable`, the user-agent escape hatch. There is no `brotli_disable`.
+
+So if you rely on any of those to keep particular responses uncompressed -
+authenticated or private responses passing through a shared proxy being the
+usual case - turning `brotli on` in that location removes the protection
+rather than mirroring it. Either leave `brotli` off there, or restrict it to
+locations where compressing every eligible response is acceptable.
+
+Worth remembering separately that compressing a response which mixes a secret
+(a CSRF token, a session identifier) with attacker-influenced reflected input
+leaks that secret through the response length, the BREACH attack. That applies
+to any HTTP compression rather than to this module specifically, and neither
+this module nor gzip mitigates it.
+
 #### Proxied responses and time to first byte
 
 Brotli accumulates roughly 64 KB of input before it emits anything, unless it
