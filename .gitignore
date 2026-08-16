@@ -1,3 +1,10 @@
 # Build output from the vendored Brotli; the submodule itself is tracked.
 deps/brotli/out/
 .vscode/
+
+# Artifacts left behind by the test scripts. script/test holds nginx's access
+# and error logs, which record client addresses, alongside the corpus; tmp
+# holds response bodies; nginx is the source tree script/build.sh clones.
+script/test/
+tmp/
+nginx/
