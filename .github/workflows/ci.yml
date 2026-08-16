@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
-        nginx: [release-1.26.2, release-1.27.4]
+        nginx: [release-1.30.4, release-1.31.3]
 
     env:
       CC: ${{ matrix.cc }}
@@ -76,7 +76,7 @@ jobs:
 
       - name: Build nginx with AddressSanitizer
         run: |
-          git clone --depth 1 --branch release-1.27.4 \
+          git clone --depth 1 --branch release-1.31.3 \
               https://github.com/nginx/nginx.git nginx
           cd nginx
           ./auto/configure \
