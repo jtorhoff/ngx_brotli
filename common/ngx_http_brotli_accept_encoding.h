@@ -47,23 +47,39 @@ static ngx_uint_t ngx_http_brotli_is_zero_weighted(u_char* cursor,
   ngx_uint_t digits;
 
   cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
-  if (cursor == end || *cursor++ != ';') return 0;
+  if (cursor == end || *cursor++ != ';') {
+    return 0;
+  }
   cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
-  if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) return 0;
+  if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) {
+    return 0;
+  }
   cursor++;
   cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
-  if (cursor == end || *cursor++ != '=') return 0;
+  if (cursor == end || *cursor++ != '=') {
+    return 0;
+  }
   cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
   /* Any weight not starting with "0" is non-zero. */
-  if (cursor == end || *cursor++ != '0') return 0;
+  if (cursor == end || *cursor++ != '0') {
+    return 0;
+  }
   /* "q=0" with nothing after it, or with no fraction. */
-  if (cursor == end || *cursor != '.') return 1;
+  if (cursor == end || *cursor != '.') {
+    return 1;
+  }
   cursor++;
   /* RFC 9110 permits at most three digits after the point. */
   for (digits = 0; digits < 3; digits++) {
-    if (cursor == end) return 1; /* "q=0." */
-    if (*cursor < '0' || *cursor > '9') return 1;
-    if (*cursor > '0') return 0; /* a non-zero digit */
+    if (cursor == end) {
+      return 1; /* "q=0." */
+    }
+    if (*cursor < '0' || *cursor > '9') {
+      return 1;
+    }
+    if (*cursor > '0') {
+      return 0; /* a non-zero digit */
+    }
     cursor++;
   }
   return 1;
@@ -87,10 +103,14 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
   u_char after;
 
   accept_encoding_entry = req->headers_in.accept_encoding;
-  if (accept_encoding_entry == NULL) return NGX_DECLINED;
+  if (accept_encoding_entry == NULL) {
+    return NGX_DECLINED;
+  }
   accept_encoding = &accept_encoding_entry->value;
 
-  if (accept_encoding->len < ngx_http_brotli_encoding_len) return NGX_DECLINED;
+  if (accept_encoding->len < ngx_http_brotli_encoding_len) {
+    return NGX_DECLINED;
+  }
 
   start = accept_encoding->data;
   end = start + accept_encoding->len;
@@ -101,7 +121,9 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
        off the end of. */
     cursor = ngx_strlcasestrn(cursor, end, (u_char*)ngx_http_brotli_encoding,
                               ngx_http_brotli_encoding_len - 1);
-    if (cursor == NULL) return NGX_DECLINED;
+    if (cursor == NULL) {
+      return NGX_DECLINED;
+    }
 
     /* "br" has to stand alone as a token; reject a match inside a longer one
        such as "brotli" or "x-br". A match at either edge of the header is
@@ -118,7 +140,9 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
       continue;
     }
 
-    if (ngx_http_brotli_is_zero_weighted(cursor, end)) return NGX_DECLINED;
+    if (ngx_http_brotli_is_zero_weighted(cursor, end)) {
+      return NGX_DECLINED;
+    }
     return NGX_OK;
   }
 }

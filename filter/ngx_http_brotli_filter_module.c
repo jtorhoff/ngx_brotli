@@ -498,8 +498,8 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     ok = BrotliEncoderCompressStream(
         ctx->encoder,
         ctx->in->buf->last_buf ? BROTLI_OPERATION_FINISH
-                               : ctx->in->buf->flush ? BROTLI_OPERATION_FLUSH
-                                                     : BROTLI_OPERATION_PROCESS,
+        : ctx->in->buf->flush  ? BROTLI_OPERATION_FLUSH
+                               : BROTLI_OPERATION_PROCESS,
         &available_input, &next_input_byte, &available_output, NULL, NULL);
     r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     if (!ok) {
@@ -692,8 +692,12 @@ static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx) {
 }
 
 static ngx_int_t ngx_http_brotli_check_request(ngx_http_request_t* req) {
-  if (req != req->main) return NGX_DECLINED;
-  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) return NGX_DECLINED;
+  if (req != req->main) {
+    return NGX_DECLINED;
+  }
+  if (ngx_http_brotli_check_accept_encoding(req) != NGX_OK) {
+    return NGX_DECLINED;
+  }
   req->gzip_tested = 1;
   req->gzip_ok = 0;
   return NGX_OK;
