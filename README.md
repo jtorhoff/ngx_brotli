@@ -280,14 +280,20 @@ brotli_types application/atom+xml application/javascript application/json applic
 
 ## Tests
 
-Two suites, both expecting an nginx binary built with this module:
+Two suites, both expecting an nginx binary built with this module. The same
+scripts run in CI, so a green local run means a green pipeline:
 
 ```bash
-script/.travis-compile.sh      # builds ./nginx and the brotli CLI
-script/.travis-before-test.sh  # fetches the sample corpus
-script/.travis-test.sh         # static files and Accept-Encoding parsing
+script/build.sh                # Brotli library and CLI, then nginx
+script/prepare-tests.sh        # fixtures for the shell suite
+script/run-tests.sh            # static files and Accept-Encoding parsing
 python3 script/test_stream.py  # streaming responses and encoder lifetime
 ```
+
+`run-tests.sh` takes `NGINX_BIN` and `BROTLI` if you would rather point it at
+binaries you already have. It is `NGINX_BIN` rather than `NGINX` because nginx
+reserves the latter for socket inheritance and would read a path there as a
+list of socket numbers.
 
 `test_stream.py` covers what the shell suite does not: responses whose length
 is unknown until the body has been streamed, and the lifetime of the Brotli
@@ -303,7 +309,7 @@ It exits with the number of failed tests. The window and memory tests read the
 encoder's allocator tracing out of the debug log, so build nginx with
 `--with-debug` to run them - they are skipped, not failed, on a release build.
 Round-trip tests need a brotli decoder, either the python `brotli` module or
-the CLI that `script/.travis-compile.sh` builds into `deps/brotli/out`.
+the CLI that `script/build.sh` builds into `deps/brotli/out`.
 
 ## Contributing
 

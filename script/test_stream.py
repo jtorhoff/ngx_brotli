@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression harness for the ngx_brotli filter module.
 
-script/.travis-test.sh already covers Accept-Encoding parsing against static
+script/run-tests.sh already covers Accept-Encoding parsing against static
 files. This harness covers the two areas it does not:
 
   * streaming responses, where Content-Length is unknown and the body reaches
@@ -16,7 +16,7 @@ Usage:
     python3 script/test_stream.py [--nginx PATH] [--keep] [-v]
 
 nginx is looked up in --nginx, then $NGINX, then ./nginx/objs/nginx (where
-script/.travis-compile.sh puts it). Exits with the number of failed tests, so
+script/build.sh puts it). Exits with the number of failed tests, so
 it can be chained after the existing suite.
 """
 
@@ -101,7 +101,7 @@ def locate_nginx(explicit):
     raise SystemExit(
         f"error: nginx binary not found.\n"
         f"  Looked at: {looked_at}\n"
-        f"  Build one with script/.travis-compile.sh, or pass --nginx PATH."
+        f"  Build one with script/build.sh, or pass --nginx PATH."
     )
 
 
