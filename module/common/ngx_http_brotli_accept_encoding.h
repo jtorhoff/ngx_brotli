@@ -89,9 +89,11 @@ static ngx_uint_t ngx_http_brotli_is_zero_weighted(u_char* cursor,
 
    "br" is taken whenever it appears as a token in Accept-Encoding, whatever
    weight it carries, with the single exception of an explicit zero - which
-   RFC 9110 defines as "not acceptable". Relative weights are deliberately
-   ignored, so "gzip;q=1.0, br;q=0.1" still selects Brotli. Choosing Brotli
-   then suppresses gzip for the request, in ngx_http_brotli_claim_request. */
+   RFC 9110 defines as "not acceptable". A wildcard ("*") is taken on the
+   same terms, since RFC 9110 says it covers any coding not explicitly
+   listed. Relative weights are deliberately ignored, so "gzip;q=1.0,
+   br;q=0.1" still selects Brotli. Choosing Brotli then suppresses gzip for
+   the request, in ngx_http_brotli_claim_request. */
 static ngx_int_t ngx_http_brotli_check_accept_encoding(
     ngx_http_request_t* req) {
   ngx_table_elt_t* accept_encoding_entry;
@@ -101,6 +103,9 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
   u_char* end;
   u_char before;
   u_char after;
+  u_char* token;
+  size_t token_len;
+  ngx_uint_t pass;
 
   accept_encoding_entry = req->headers_in.accept_encoding;
   if (accept_encoding_entry == NULL) {
@@ -108,51 +113,64 @@ static ngx_int_t ngx_http_brotli_check_accept_encoding(
   }
   accept_encoding = &accept_encoding_entry->value;
 
-  if (accept_encoding->len < ngx_http_brotli_encoding_len) {
-    return NGX_DECLINED;
-  }
-
   start = accept_encoding->data;
   end = start + accept_encoding->len;
-  cursor = start;
 
-  for (;;) {
-    /* Bounded search, so a header without a terminating NUL can not be run
-       off the end of. */
-    cursor = ngx_strlcasestrn(cursor, end, (u_char*)ngx_http_brotli_encoding,
-                              ngx_http_brotli_encoding_len - 1);
-    if (cursor == NULL) {
-      return NGX_DECLINED;
-    }
-
-    /* "br" has to stand alone as a token; reject a match inside a longer one
-       such as "brotli" or "x-br". A match at either edge of the header is
-       treated as if a separator sat beside it. */
-    if (cursor == start) {
-      before = ',';
+  /* Pass 0 looks for "br", pass 1 for the wildcard - either is enough to
+     accept. */
+  for (pass = 0; pass < 2; pass++) {
+    if (pass == 0) {
+      token = (u_char*)ngx_http_brotli_encoding;
+      token_len = ngx_http_brotli_encoding_len;
     } else {
-      before = cursor[-1];
-    }
-    cursor += ngx_http_brotli_encoding_len;
-    if (cursor == end) {
-      after = ',';
-    } else {
-      after = *cursor;
+      token = (u_char*)"*";
+      token_len = 1;
     }
 
-    if (before != ',' && !ngx_http_brotli_is_optional_whitespace(before)) {
-      continue;
-    }
-    if (after != ',' && after != ';' &&
-        !ngx_http_brotli_is_optional_whitespace(after)) {
+    if (accept_encoding->len < token_len) {
       continue;
     }
 
-    if (ngx_http_brotli_is_zero_weighted(cursor, end)) {
-      return NGX_DECLINED;
+    cursor = start;
+
+    for (;;) {
+      /* Bounded search, so a header without a terminating NUL can not be
+         run off the end of. */
+      cursor = ngx_strlcasestrn(cursor, end, token, token_len - 1);
+      if (cursor == NULL) {
+        break;
+      }
+
+      /* The token has to stand alone; reject a match inside a longer one
+         such as "brotli" or "x-br". A match at either edge of the header is
+         treated as if a separator sat beside it. */
+      if (cursor == start) {
+        before = ',';
+      } else {
+        before = cursor[-1];
+      }
+      cursor += token_len;
+      if (cursor == end) {
+        after = ',';
+      } else {
+        after = *cursor;
+      }
+
+      if (before != ',' && !ngx_http_brotli_is_optional_whitespace(before)) {
+        continue;
+      }
+      if (after != ',' && after != ';' &&
+          !ngx_http_brotli_is_optional_whitespace(after)) {
+        continue;
+      }
+
+      if (!ngx_http_brotli_is_zero_weighted(cursor, end)) {
+        return NGX_OK;
+      }
     }
-    return NGX_OK;
   }
+
+  return NGX_DECLINED;
 }
 
 /* Decides whether this request should be served Brotli at all, and claims it
