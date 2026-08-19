@@ -126,7 +126,7 @@ typedef struct {
    definition, not here, so that the explanation is where the code is. */
 
 static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
-    ngx_http_request_t *r, ngx_http_brotli_ctx_t *ctx);
+    ngx_http_brotli_ctx_t *ctx);
 static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t *ctx);
 static size_t ngx_http_brotli_filter_pending_input(ngx_chain_t *in,
     ngx_uint_t *complete, ngx_uint_t *urgent);
@@ -352,12 +352,14 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
    the encoder may be touched again. The encoder must not be, while any of its
    output is still outstanding: out_buf points into memory Brotli owns. */
 static ngx_http_brotli_step_e
-ngx_http_brotli_filter_send_output(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t                             *ctx)
+ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
 {
-    ngx_int_t    rc;
-    ptrdiff_t    available_busy_output;
-    ngx_chain_t *to_send;
+    ngx_int_t           rc;
+    ptrdiff_t           available_busy_output;
+    ngx_chain_t        *to_send;
+    ngx_http_request_t *r;
+
+    r = ctx->request;
 
     if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
         available_busy_output = ngx_buf_size(ctx->out_buf);
@@ -407,11 +409,13 @@ ngx_http_brotli_filter_send_output(ngx_http_request_t *r,
 /* Wraps whatever the encoder has produced in out_buf, and marks it last or
    flush if this block ends the stream or a meta-block. */
 static ngx_http_brotli_step_e
-ngx_http_brotli_filter_take_output(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t                             *ctx)
+ngx_http_brotli_filter_take_output(ngx_http_brotli_ctx_t *ctx)
 {
-    size_t  available_output;
-    u_char *out;
+    size_t              available_output;
+    u_char             *out;
+    ngx_http_request_t *r;
+
+    r = ctx->request;
 
     available_output = 0;
     out = (u_char *) BrotliEncoderTakeOutput(ctx->encoder, &available_output);
@@ -449,9 +453,9 @@ ngx_http_brotli_filter_take_output(ngx_http_request_t *r,
    when the caller only wants progress - not ctx->in, which is what is left to
    compress. */
 static ngx_http_brotli_step_e
-ngx_http_brotli_filter_feed_encoder(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
+ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
 {
+    ngx_http_request_t    *r;
     size_t                 input_size;
     size_t                 available_input;
     size_t                 available_output;
@@ -460,6 +464,8 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_request_t *r,
     BROTLI_BOOL            ok;
     ngx_chain_t           *link;
     BrotliEncoderOperation operation;
+
+    r = ctx->request;
 
     if (BrotliEncoderIsFinished(ctx->encoder)) {
         r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
@@ -677,7 +683,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
     }
 
-    if (ngx_http_brotli_filter_ensure_stream_initialized(r, ctx) != NGX_OK) {
+    if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) != NGX_OK) {
         ngx_http_brotli_filter_close(ctx);
         return NGX_ERROR;
     }
@@ -693,11 +699,11 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
        switch below. */
     for (;;) {
         if (ctx->output != NGX_HTTP_BROTLI_OUTPUT_IDLE) {
-            step = ngx_http_brotli_filter_send_output(r, ctx);
+            step = ngx_http_brotli_filter_send_output(ctx);
         } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
-            step = ngx_http_brotli_filter_take_output(r, ctx);
+            step = ngx_http_brotli_filter_take_output(ctx);
         } else {
-            step = ngx_http_brotli_filter_feed_encoder(r, ctx, in);
+            step = ngx_http_brotli_filter_feed_encoder(ctx, in);
         }
 
         switch (step) {
@@ -748,9 +754,9 @@ ngx_http_brotli_filter_pending_input(ngx_chain_t *in, ngx_uint_t *complete,
    if encoder is successfully initialized (have been already initialized),
    and requires objects are allocated. Returns NGX_ERROR otherwise. */
 static ngx_int_t
-ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t                                           *ctx)
+ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_brotli_ctx_t *ctx)
 {
+    ngx_http_request_t     *r;
     ngx_http_brotli_conf_t *conf;
     ngx_pool_cleanup_t     *cln;
     BROTLI_BOOL             ok;
@@ -760,6 +766,7 @@ ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_request_t *r,
         return NGX_OK;
     }
 
+    r = ctx->request;
     conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
 
     /* Tune lg_win, if size is known. */
