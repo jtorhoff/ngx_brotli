@@ -122,14 +122,18 @@ static ngx_int_t handler(ngx_http_request_t* req) {
     }
   }
 
-  /* Get path and append the suffix. */
+  /* Get path and append the suffix. ngx_http_map_uri_to_path leaves path.len
+     holding the size of the buffer it allocated - the path, the room asked
+     for here, and a terminating zero - not the length of the string in it.
+     So the length has to be computed from the write pointer, as nginx's own
+     gzip_static does; adding the suffix length to what it returned would
+     overshoot the string by four and the allocation itself by three. */
   last = ngx_http_map_uri_to_path(req, &path, &root, kSuffixLen);
   if (last == NULL) {
     return NGX_HTTP_INTERNAL_SERVER_ERROR;
   }
-  /* +1 for reinstating the terminating 0. */
   ngx_cpystrn(last, kSuffix, kSuffixLen + 1);
-  path.len += kSuffixLen;
+  path.len = last + kSuffixLen - path.data;
 
   log = req->connection->log;
   ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http filename: \"%s\"",

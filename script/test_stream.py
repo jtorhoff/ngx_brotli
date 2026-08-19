@@ -149,6 +149,40 @@ def locate_decoder():
     return decode_with_cli
 
 
+def locate_encoder():
+    """Returns a callable bytes->bytes, or None if brotli cannot be encoded.
+
+    Only the brotli_static tests need this: they have to lay down a real ".br"
+    sibling for the module to find, and nginx will not make one for them.
+    """
+    try:
+        import brotli  # type: ignore
+
+        return brotli.compress
+    except ImportError:
+        pass
+
+    bundled = os.path.join(ROOT, "deps", "brotli", "out", "brotli")
+    cli = shutil.which("brotli")
+    if not cli and os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        cli = bundled
+    if not cli:
+        return None
+
+    def encode_with_cli(data):
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(data)
+            path = handle.name
+        try:
+            return subprocess.run(
+                [cli, "-c", path], capture_output=True, check=True
+            ).stdout
+        finally:
+            os.unlink(path)
+
+    return encode_with_cli
+
+
 def port_is_free(port):
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -236,6 +270,21 @@ def build_fixtures(work):
             handle.write(content)
 
     fixtures = {name: content.encode() for name, content in files.items()}
+
+    # A pre-compressed sibling for brotli_static to find. Written only when an
+    # encoder is available; the tests skip otherwise.
+    encode = locate_encoder()
+    if encode:
+        precompressed = f"<html><body>{make_text(2000, 5)}</body></html>".encode()
+        with open(os.path.join(html, "precompressed.html"), "wb") as handle:
+            handle.write(precompressed)
+        with open(os.path.join(html, "precompressed.html.br"), "wb") as handle:
+            handle.write(encode(precompressed))
+        fixtures["precompressed.html"] = precompressed
+        # No ".br" sibling, so brotli_static has to fall through to it.
+        with open(os.path.join(html, "plain_only.html"), "wb") as handle:
+            handle.write(precompressed)
+        fixtures["plain_only.html"] = precompressed
 
     for name, blob in load_corpus().items():
         with open(os.path.join(html, name), "wb") as handle:
@@ -669,6 +718,67 @@ def check_corpus_roundtrip(ctx, name, path=None):
         f"original ({len(original)})",
     )
     check(ctx.decode(body) == original, f"{path}: decoded body differs")
+
+
+@test("brotli_static serves a pre-compressed sibling", needs_decoder=True)
+def test_static_module_serves_br(ctx):
+    if "precompressed.html" not in ctx.fixtures:
+        raise Failure("no brotli encoder available to build the .br fixture")
+
+    status, headers, body = fetch(ctx.port, "/static/precompressed.html")
+    check(status == 200, f"expected 200, got {status}")
+    check(
+        headers.get("content-encoding") == "br",
+        f"brotli_static did not serve the .br sibling; headers: {headers!r}",
+    )
+    check(
+        ctx.decode(body) == ctx.fixtures["precompressed.html"],
+        "the served .br did not decode back to the original",
+    )
+    # Twice, so the second request is answered from open_file_cache. That is
+    # the path that hashes the constructed name over its length.
+    status, headers, body = fetch(ctx.port, "/static/precompressed.html")
+    check(status == 200, f"cached request: expected 200, got {status}")
+    check(
+        ctx.decode(body) == ctx.fixtures["precompressed.html"],
+        "the cached .br did not decode back to the original",
+    )
+
+
+@test("brotli_static declines a client that will not take br")
+def test_static_module_declines_plain_client(ctx):
+    if "precompressed.html" not in ctx.fixtures:
+        raise Failure("no brotli encoder available to build the .br fixture")
+
+    status, headers, body = fetch(
+        ctx.port, "/static/precompressed.html", accept_encoding=None
+    )
+    check(status == 200, f"expected 200, got {status}")
+    check(
+        "content-encoding" not in headers,
+        f"a client that sent no Accept-Encoding got {headers!r}",
+    )
+    check(
+        body == ctx.fixtures["precompressed.html"],
+        "the plain client did not receive the uncompressed file",
+    )
+
+
+@test("brotli_static falls through when there is no .br sibling")
+def test_static_module_without_sibling(ctx):
+    if "plain_only.html" not in ctx.fixtures:
+        raise Failure("no brotli encoder available to build the fixtures")
+
+    status, headers, body = fetch(ctx.port, "/static/plain_only.html")
+    check(status == 200, f"expected 200, got {status}")
+    check(
+        "content-encoding" not in headers,
+        f"a file with no .br sibling was served as {headers!r}",
+    )
+    check(
+        body == ctx.fixtures["plain_only.html"],
+        "the fallback did not serve the original file",
+    )
 
 
 @test("real HTML round-trips", needs_decoder=True, needs_corpus=True)
