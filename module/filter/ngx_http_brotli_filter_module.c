@@ -65,6 +65,20 @@ typedef enum {
     NGX_HTTP_BROTLI_OUTPUT_BUSY
 } ngx_http_brotli_output_e;
 
+/* What one turn of the body filter's loop decided to do next. The loop owns
+   the returns; a step only says which one, so that each phase can be read on
+   its own without tracing control flow back out through the loop. */
+typedef enum {
+    /* Made progress; go round again. */
+    NGX_HTTP_BROTLI_STEP_CONTINUE = 0,
+    /* Nothing more to do this call; return NGX_OK. */
+    NGX_HTTP_BROTLI_STEP_DONE,
+    /* Blocked on the next filter; return NGX_AGAIN. */
+    NGX_HTTP_BROTLI_STEP_AGAIN,
+    /* Unrecoverable; the loop closes the stream and returns NGX_ERROR. */
+    NGX_HTTP_BROTLI_STEP_FAILED
+} ngx_http_brotli_step_e;
+
 /* Instance context. */
 typedef struct {
     /* Brotli encoder instance. */
@@ -333,6 +347,226 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     return ngx_http_next_header_filter(r);
 }
 
+
+/* Hands the committed output buffer to the next filter, and reports whether
+   the encoder may be touched again. The encoder must not be, while any of its
+   output is still outstanding: out_buf points into memory Brotli owns. */
+static ngx_http_brotli_step_e
+ngx_http_brotli_filter_send_output(ngx_http_request_t *r,
+    ngx_http_brotli_ctx_t                             *ctx)
+{
+    ngx_int_t    rc;
+    ptrdiff_t    available_busy_output;
+    ngx_chain_t *to_send;
+
+    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
+        available_busy_output = ngx_buf_size(ctx->out_buf);
+    } else {
+        available_busy_output = 0;
+    }
+
+    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
+        to_send = ctx->out_chain;
+    } else {
+        to_send = NULL;
+    }
+
+    rc = ngx_http_next_body_filter(r, to_send);
+
+    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
+        ctx->output = NGX_HTTP_BROTLI_OUTPUT_BUSY;
+    }
+    if (ngx_buf_size(ctx->out_buf) == 0) {
+        ctx->output = NGX_HTTP_BROTLI_OUTPUT_IDLE;
+    }
+
+    if (rc == NGX_OK) {
+        if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
+            available_busy_output == ngx_buf_size(ctx->out_buf)) {
+            r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+            return NGX_HTTP_BROTLI_STEP_AGAIN;
+        }
+        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+    }
+
+    if (rc == NGX_AGAIN) {
+        if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
+            /* Can't continue compression, let the outer filter decide. */
+            if (ctx->in != NULL) {
+                r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+            }
+            return NGX_HTTP_BROTLI_STEP_AGAIN;
+        }
+        /* Inner filter has given up, but we can continue processing. */
+        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+    }
+
+    return NGX_HTTP_BROTLI_STEP_FAILED;
+}
+
+/* Wraps whatever the encoder has produced in out_buf, and marks it last or
+   flush if this block ends the stream or a meta-block. */
+static ngx_http_brotli_step_e
+ngx_http_brotli_filter_take_output(ngx_http_request_t *r,
+    ngx_http_brotli_ctx_t                             *ctx)
+{
+    size_t  available_output;
+    u_char *out;
+
+    available_output = 0;
+    out = (u_char *) BrotliEncoderTakeOutput(ctx->encoder, &available_output);
+    if (out == NULL || available_output == 0) {
+        return NGX_HTTP_BROTLI_STEP_FAILED;
+    }
+
+    ctx->out_buf->start = out;
+    ctx->out_buf->pos = out;
+    ctx->out_buf->last = out + available_output;
+    ctx->out_buf->end = out + available_output;
+    ctx->out_buf->last_buf = 0;
+    ctx->out_buf->flush = 0;
+
+    if (ctx->end_of_input && BrotliEncoderIsFinished(ctx->encoder)) {
+        ctx->out_buf->last_buf = 1;
+        r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+    } else if (ctx->end_of_block) {
+        ctx->out_buf->flush = 1;
+        r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+    }
+
+    ctx->end_of_block = 0;
+    ctx->output = NGX_HTTP_BROTLI_OUTPUT_READY;
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+        "brotli out: %p, size:%uz", ctx->out_buf, ngx_buf_size(ctx->out_buf));
+
+    return NGX_HTTP_BROTLI_STEP_CONTINUE;
+}
+
+/* Advances the encoder now that it holds no output: finishes the stream,
+   drains what a flush would release, or pushes the next input buffer in.
+   "in" is the chain this call of the body filter was given, which is NULL
+   when the caller only wants progress - not ctx->in, which is what is left to
+   compress. */
+static ngx_http_brotli_step_e
+ngx_http_brotli_filter_feed_encoder(ngx_http_request_t *r,
+    ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
+{
+    size_t                 input_size;
+    size_t                 available_input;
+    size_t                 available_output;
+    size_t                 consumed_input;
+    const uint8_t         *next_input_byte;
+    BROTLI_BOOL            ok;
+    ngx_chain_t           *link;
+    BrotliEncoderOperation operation;
+
+    if (BrotliEncoderIsFinished(ctx->encoder)) {
+        r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+        ngx_http_brotli_filter_close(ctx);
+        return NGX_HTTP_BROTLI_STEP_DONE;
+    }
+
+    if (ctx->end_of_input) {
+        /* Ask the encoder to dump the leftover. */
+        available_input = 0;
+        available_output = 0;
+        ok = BrotliEncoderCompressStream(ctx->encoder, BROTLI_OPERATION_FINISH,
+            &available_input, NULL, &available_output, NULL, NULL);
+        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+        if (!ok) {
+            return NGX_HTTP_BROTLI_STEP_FAILED;
+        }
+        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+    }
+
+    if (ctx->in == NULL) {
+        /* A NULL chain means the caller wants whatever we have. If the encoder
+           is holding input that PROCESS will not emit until a block fills, ask
+           for it now: without this a slowly-produced response stalls until
+           64 KB has accumulated. Costs a few percent of ratio, because each
+           flush closes a meta-block early. */
+        if (in == NULL && ctx->unflushed_input) {
+            available_input = 0;
+            available_output = 0;
+            ok = BrotliEncoderCompressStream(ctx->encoder,
+                BROTLI_OPERATION_FLUSH, &available_input, NULL,
+                &available_output, NULL, NULL);
+            ctx->unflushed_input = 0;
+            /* Mark the resulting buffer so the filters below push it out
+               rather than holding it for more. */
+            ctx->end_of_block = 1;
+            r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+            if (!ok) {
+                return NGX_HTTP_BROTLI_STEP_FAILED;
+            }
+            return NGX_HTTP_BROTLI_STEP_CONTINUE;
+        }
+        return NGX_HTTP_BROTLI_STEP_DONE;
+    }
+
+    /* TODO: coalesce tiny inputs, if they are not last/flush. */
+    input_size = ngx_buf_size(ctx->in->buf);
+    /* An empty buffer carries nothing to compress, but one marked last or
+       flush still has to reach the encoder to close the stream or the block.
+       Anything else is dropped. */
+    if (input_size == 0 && !ctx->in->buf->last_buf && !ctx->in->buf->flush) {
+        link = ctx->in;
+        ctx->in = ctx->in->next;
+        ngx_free_chain(r->pool, link);
+        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+    }
+
+    available_input = input_size;
+    next_input_byte = (const uint8_t *) ctx->in->buf->pos;
+    available_output = 0;
+    if (ctx->in->buf->last_buf) {
+        operation = BROTLI_OPERATION_FINISH;
+    } else if (ctx->in->buf->flush) {
+        operation = BROTLI_OPERATION_FLUSH;
+    } else {
+        operation = BROTLI_OPERATION_PROCESS;
+    }
+
+    ok = BrotliEncoderCompressStream(ctx->encoder, operation, &available_input,
+        &next_input_byte, &available_output, NULL, NULL);
+    r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+    if (!ok) {
+        return NGX_HTTP_BROTLI_STEP_FAILED;
+    }
+
+    consumed_input = input_size - available_input;
+    ctx->in->buf->pos += consumed_input;
+
+    if (operation == BROTLI_OPERATION_PROCESS) {
+        if (consumed_input > 0) {
+            ctx->unflushed_input = 1;
+        }
+    } else {
+        ctx->unflushed_input = 0;
+    }
+
+    if (consumed_input == input_size) {
+        if (ctx->in->buf->last_buf) {
+            ctx->end_of_input = 1;
+        } else if (ctx->in->buf->flush) {
+            ctx->end_of_block = 1;
+        }
+        link = ctx->in;
+        ctx->in = ctx->in->next;
+        ngx_free_chain(r->pool, link);
+        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+    }
+
+    /* Should never happen, just to make sure we don't enter infinite loop. */
+    if (consumed_input == 0) {
+        return NGX_HTTP_BROTLI_STEP_FAILED;
+    }
+
+    /* Partially consumed: the rest of this buffer goes in next time round. */
+    return NGX_HTTP_BROTLI_STEP_CONTINUE;
+}
+
 /* Response body filtration (compression). */
 static ngx_int_t
 ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
@@ -340,21 +574,12 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ngx_int_t               rc;
     ngx_http_brotli_ctx_t  *ctx;
     ngx_http_brotli_conf_t *conf;
+    ngx_http_brotli_step_e  step;
     size_t                  pending;
     ngx_uint_t              complete;
     ngx_uint_t              urgent;
     ngx_uint_t              compress;
-    size_t                  available_output;
-    ptrdiff_t               available_busy_output;
-    size_t                  input_size;
-    size_t                  available_input;
-    const uint8_t          *next_input_byte;
-    size_t                  consumed_input;
-    BROTLI_BOOL             ok;
-    u_char                 *out;
     ngx_chain_t            *link;
-    ngx_chain_t            *to_send;
-    BrotliEncoderOperation  operation;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
 
@@ -457,199 +682,41 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         return NGX_ERROR;
     }
 
-    /* Main loop:
-       - if output is not yet consumed - stop; encoder should not be touched,
-         until all the output is consumed
-       - if encoder has output - wrap it and send to consumer
-       - if encoder is finished (and all output is consumed) - stop
-       - if there is more input - push it to encoder */
+    /* Main loop, one phase per turn:
+       - output still outstanding - push it down, and do not touch the encoder
+         until it has all been consumed
+       - encoder has output - wrap it
+       - otherwise - advance the encoder: finish, flush, or feed it input
+
+       Each phase returns what to do next rather than returning from here
+       itself, so the four ways out of this filter are all written once, in the
+       switch below. */
     for (;;) {
         if (ctx->output != NGX_HTTP_BROTLI_OUTPUT_IDLE) {
-            if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
-                available_busy_output = ngx_buf_size(ctx->out_buf);
-            } else {
-                available_busy_output = 0;
-            }
-
-            if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
-                to_send = ctx->out_chain;
-            } else {
-                to_send = NULL;
-            }
-
-            rc = ngx_http_next_body_filter(r, to_send);
-            if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
-                ctx->output = NGX_HTTP_BROTLI_OUTPUT_BUSY;
-            }
-            if (ngx_buf_size(ctx->out_buf) == 0) {
-                ctx->output = NGX_HTTP_BROTLI_OUTPUT_IDLE;
-            }
-            if (rc == NGX_OK) {
-                if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
-                    available_busy_output == ngx_buf_size(ctx->out_buf)) {
-                    r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-                    return NGX_AGAIN;
-                }
-                continue;
-            } else if (rc == NGX_AGAIN) {
-                if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
-                    /* Can't continue compression, let the outer filter
-                       decide. */
-                    if (ctx->in != NULL) {
-                        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-                    }
-                    return NGX_AGAIN;
-                } else {
-                    /* Inner filter has given up, but we can continue
-                     * processing. */
-                    continue;
-                }
-            } else {
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-            }
-        }
-
-        if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
-            available_output = 0;
-            out = (u_char *) BrotliEncoderTakeOutput(ctx->encoder,
-                &available_output);
-            if (out == NULL || available_output == 0) {
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-            }
-            ctx->out_buf->start = out;
-            ctx->out_buf->pos = out;
-            ctx->out_buf->last = out + available_output;
-            ctx->out_buf->end = out + available_output;
-            ctx->out_buf->last_buf = 0;
-            ctx->out_buf->flush = 0;
-            if (ctx->end_of_input && BrotliEncoderIsFinished(ctx->encoder)) {
-                ctx->out_buf->last_buf = 1;
-                r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-            } else if (ctx->end_of_block) {
-                ctx->out_buf->flush = 1;
-                r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-            }
-            ctx->end_of_block = 0;
-            ctx->output = NGX_HTTP_BROTLI_OUTPUT_READY;
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                "brotli out: %p, size:%uz", ctx->out_buf,
-                ngx_buf_size(ctx->out_buf));
-            continue;
-        }
-
-        if (BrotliEncoderIsFinished(ctx->encoder)) {
-            r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-            ngx_http_brotli_filter_close(ctx);
-            return NGX_OK;
-        }
-
-        if (ctx->end_of_input) {
-            // Ask the encoder to dump the leftover.
-            available_input = 0;
-            available_output = 0;
-            ok = BrotliEncoderCompressStream(ctx->encoder,
-                BROTLI_OPERATION_FINISH, &available_input, NULL,
-                &available_output, NULL, NULL);
-            r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-            if (!ok) {
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-            }
-            continue;
-        }
-
-        if (ctx->in == NULL) {
-            /* A NULL chain means the caller wants whatever we have. If the
-               encoder is holding input that PROCESS will not emit until a block
-               fills, ask for it now: without this a slowly-produced response
-               stalls until 64 KB has accumulated. Costs a few percent of ratio,
-               because each flush closes a meta-block early. */
-            if (in == NULL && ctx->unflushed_input) {
-                available_input = 0;
-                available_output = 0;
-                ok = BrotliEncoderCompressStream(ctx->encoder,
-                    BROTLI_OPERATION_FLUSH, &available_input, NULL,
-                    &available_output, NULL, NULL);
-                ctx->unflushed_input = 0;
-                /* Mark the resulting buffer so the filters below push it out
-                   rather than holding it for more. */
-                ctx->end_of_block = 1;
-                r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-                if (!ok) {
-                    ngx_http_brotli_filter_close(ctx);
-                    return NGX_ERROR;
-                }
-                continue;
-            }
-            return NGX_OK;
-        }
-
-        /* TODO: coalesce tiny inputs, if they are not last/flush. */
-        input_size = ngx_buf_size(ctx->in->buf);
-        /* An empty buffer carries nothing to compress, but one marked last or
-           flush still has to reach the encoder to close the stream or the
-           block. Anything else is dropped. */
-        if (input_size == 0 && !ctx->in->buf->last_buf &&
-            !ctx->in->buf->flush) {
-            link = ctx->in;
-            ctx->in = ctx->in->next;
-            ngx_free_chain(r->pool, link);
-            continue;
-        }
-
-        available_input = input_size;
-        next_input_byte = (const uint8_t *) ctx->in->buf->pos;
-        available_output = 0;
-        if (ctx->in->buf->last_buf) {
-            operation = BROTLI_OPERATION_FINISH;
-        } else if (ctx->in->buf->flush) {
-            operation = BROTLI_OPERATION_FLUSH;
+            step = ngx_http_brotli_filter_send_output(r, ctx);
+        } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
+            step = ngx_http_brotli_filter_take_output(r, ctx);
         } else {
-            operation = BROTLI_OPERATION_PROCESS;
+            step = ngx_http_brotli_filter_feed_encoder(r, ctx, in);
         }
 
-        ok = BrotliEncoderCompressStream(ctx->encoder, operation,
-            &available_input, &next_input_byte, &available_output, NULL, NULL);
-        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-        if (!ok) {
-            ngx_http_brotli_filter_close(ctx);
-            return NGX_ERROR;
-        }
+        switch (step) {
+            case NGX_HTTP_BROTLI_STEP_CONTINUE:
+                break;
 
-        consumed_input = input_size - available_input;
-        ctx->in->buf->pos += consumed_input;
+            case NGX_HTTP_BROTLI_STEP_DONE:
+                return NGX_OK;
 
-        if (operation == BROTLI_OPERATION_PROCESS) {
-            if (consumed_input > 0) {
-                ctx->unflushed_input = 1;
-            }
-        } else {
-            ctx->unflushed_input = 0;
-        }
+            case NGX_HTTP_BROTLI_STEP_AGAIN:
+                return NGX_AGAIN;
 
-        if (consumed_input == input_size) {
-            if (ctx->in->buf->last_buf) {
-                ctx->end_of_input = 1;
-            } else if (ctx->in->buf->flush) {
-                ctx->end_of_block = 1;
-            }
-            link = ctx->in;
-            ctx->in = ctx->in->next;
-            ngx_free_chain(r->pool, link);
-            continue;
-        }
-
-        /* Should never happen, just to make sure we don't enter infinite
-           loop. */
-        if (consumed_input == 0) {
-            ngx_http_brotli_filter_close(ctx);
-            return NGX_ERROR;
+            default:
+                ngx_http_brotli_filter_close(ctx);
+                return NGX_ERROR;
         }
     }
 
-    /* The loop above has no break; every exit is a return. */
+    /* Unreachable: the switch above either returns or goes round again. */
 }
 
 /* Totals the unconsumed input, reporting whether the chain closes the
