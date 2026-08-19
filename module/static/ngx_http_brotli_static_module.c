@@ -32,9 +32,9 @@ static ngx_conf_enum_t ngx_http_brotli_static[] = {
 /* >> Forward declarations */
 
 static ngx_int_t ngx_http_brotli_static_handler(ngx_http_request_t *r);
-static void     *ngx_http_brotli_static_create_conf(ngx_conf_t *root_cfg);
-static char     *ngx_http_brotli_static_merge_conf(ngx_conf_t *root_cfg,
-        void *parent, void *child);
+static void *ngx_http_brotli_static_create_conf(ngx_conf_t *root_cfg);
+static char *ngx_http_brotli_static_merge_conf(ngx_conf_t *root_cfg,
+    void *parent, void *child);
 static ngx_int_t ngx_http_brotli_static_init(ngx_conf_t *root_cfg);
 
 /* << Forward declarations*/

@@ -25,7 +25,13 @@
 ---
 BasedOnStyle: LLVM
 AlignAfterOpenBracket: DontAlign
-AlignConsecutiveDeclarations: true
+AlignConsecutiveDeclarations:
+  Enabled:                   true
+  # Keep the alignment to declaration blocks inside functions, which is what
+  # nginx aligns. Without this, clang-format also pads function prototypes and
+  # the wrapped parameters of a definition into a column, which nginx does not.
+  AlignFunctionDeclarations: false
+  AlignFunctionPointers:     false
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortFunctionsOnASingleLine: None
