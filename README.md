@@ -34,9 +34,10 @@ Both Brotli library and nginx module are under active development.
 
 Two defaults have changed in favour of a smaller memory footprint, which is
 worth knowing when upgrading. `brotli_window` is now `64k` rather than `512k`,
-cutting per-request encoder memory by roughly 70% at the cost of a few percent
-of compression, and `brotli_min_length` is now `256` rather than `20`, so very
-small responses are no longer compressed at all. Set either explicitly to keep
+cutting per-request encoder memory by 58% on a response of known length and
+75% on a streamed one, at a cost in compression of 1.6% over `script/corpus`
+and 2.7% at its worst; and `brotli_min_length` is now `256` rather than `20`,
+so very small responses are no longer compressed at all. Set either explicitly to keep
 the old behaviour.
 
 `brotli_buffers` has been removed. It had been accepted and ignored for years,
@@ -109,9 +110,11 @@ extension. With the `always` value, pre-compressed file is used in all cases,
 without checking if the client supports it.
 
 Serving a pre-compressed file is by far the cheapest option: no encoder is
-created, so the request costs neither the compression CPU nor the ~1 MB of
-encoder memory that on-the-fly compression needs. Prefer it wherever the
-content is static.
+created, so the request costs neither the compression CPU nor the encoder
+memory that on-the-fly compression needs - measured against `script/corpus`,
+0.56 MB for a small response and 1.9 MB for the larger ones, since a file has
+a known length and so takes the more expensive of the two paths. Prefer it
+wherever the content is static.
 
 The catch is that every eligible request probes for `<path>.br`, and when that
 file does not exist the probe reaches the filesystem **on every request**
@@ -231,10 +234,23 @@ Sets Brotli window `size`. Acceptable values are `1k`, `2k`, `4k`, `8k`, `16k`,
 
 This is the single biggest influence on how much memory a request costs, but
 not in a straight line: at `64k` and below Brotli selects a much cheaper
-hasher, and above it encoder memory jumps sharply. Measured on HTML, a
-streamed response costs roughly 970 KB at `64k` against 3.4 MB at `512k`,
-while compressing about 2.7% worse. `32k` and `16k` occupy the same memory as
-`64k` and only compress worse, so there is little reason to go below it.
+hasher, and above it encoder memory jumps sharply. Measured against
+`script/corpus`, a streamed response peaks near 0.99 MB at `64k` against
+4.0 MB at `512k`. `32k` and `16k` occupy the same memory as `64k` and only
+compress worse, so there is little reason to go below it.
+
+What the smaller window costs in compression depends entirely on the content,
+because it only matters where a match would have reached back further than
+64 KB:
+
+| | `64k` | `512k` | cost |
+|---|---:|---:|---:|
+| CSS | 20,284 | 20,275 | +0.04% |
+| JavaScript | 26,867 | 26,754 | +0.42% |
+| minified JavaScript | 41,122 | 40,717 | +0.99% |
+| prose | 94,715 | 92,707 | +2.17% |
+| HTML | 29,339 | 28,556 | +2.74% |
+| **whole corpus** | **212,327** | **209,009** | **+1.59%** |
 
 Raise it if responses are large and bandwidth matters more than memory; a
 window larger than the response body buys nothing. Note that when the response
@@ -251,7 +267,7 @@ Sets the minimum `length` of a response that will be compressed.
 The length is determined only from the `Content-Length` response header field.
 
 Compressing very small responses is counter-productive: the encoder costs
-roughly half a megabyte of memory no matter how little it is given, and below
+some 560 KB of memory no matter how little it is given, and below
 about 128 bytes the compressed body plus the `Content-Encoding` header comes
 out larger than the original. Note that a response of unknown length is
 compressed regardless of this setting, since there is nothing to compare
@@ -330,6 +346,21 @@ a compression change roughly fourfold.
 python3 script/bench_corpus.py
 python3 script/bench_corpus.py --quality 4,5,6 --window 16k,64k
 ```
+
+At the shipped defaults, on a release build:
+
+| file | raw | compressed | ratio |
+|---|---:|---:|---:|
+| `site.css` | 204,798 | 20,284 | 10.10x |
+| `wiki.html` | 169,104 | 29,339 | 5.76x |
+| `app.js` | 109,931 | 26,867 | 4.09x |
+| `app.min.js` | 131,835 | 41,122 | 3.21x |
+| `prose.txt` | 268,490 | 94,715 | 2.83x |
+| **total** | **884,158** | **212,327** | **4.16x** |
+
+The spread is the point: already-minified JavaScript compresses barely half as
+well as the stylesheet, so a single headline ratio quoted from one file says
+very little about the next.
 
 It is a measurement tool rather than a test - a compression ratio has no pass
 or fail, and the numbers move with the vendored Brotli version - so it asserts
