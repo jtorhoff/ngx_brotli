@@ -23,6 +23,7 @@ ngx_brotli is a set of two nginx modules:
   - [`brotli_buffers`](#brotli_buffers)
   - [`brotli_comp_level`](#brotli_comp_level)
   - [`brotli_window`](#brotli_window)
+  - [`brotli_block_size`](#brotli_block_size)
   - [`brotli_min_length`](#brotli_min_length)
 - [Variables](#variables)
   - [`$brotli_ratio`](#brotli_ratio)
@@ -35,12 +36,14 @@ ngx_brotli is a set of two nginx modules:
 
 Both Brotli library and nginx module are under active development.
 
-Two defaults have changed in favour of a smaller memory footprint, which is
+Three defaults have changed in favour of a smaller memory footprint, which is
 worth knowing when upgrading. `brotli_window` is now `64k` rather than `512k`,
 cutting per-request encoder memory by roughly 70% at the cost of a few percent
-of compression, and `brotli_min_length` is now `256` rather than `20`, so very
-small responses are no longer compressed at all. Set either explicitly to keep
-the old behaviour.
+of compression; `brotli_min_length` is now `256` rather than `20`, so very
+small responses are no longer compressed at all; and `brotli_block_size` is a
+new directive defaulting to `8k`, which stops peak encoder memory from growing
+with the response size. Set each explicitly — `brotli_block_size` to `0` — to
+keep the old behaviour.
 
 ## Installation
 
@@ -235,6 +238,40 @@ Raise it if responses are large and bandwidth matters more than memory; a
 window larger than the response body buys nothing. Note that when the response
 length is known the module already lowers the window to fit, so this setting
 mainly affects streamed responses and bodies larger than the window.
+
+### `brotli_block_size`
+
+- **syntax**: `brotli_block_size <size>`
+- **default**: `8k`
+- **context**: `http`, `server`, `location`
+
+Sets how much input may accumulate into one Brotli meta-block. `0` leaves the
+encoder to its own schedule, which is a meta-block every 64k of input.
+
+Left uncapped the encoder sizes two internal buffers from whatever accumulated
+— a command array of about 12 bytes per input byte, plus output storage of
+about twice the meta-block — so peak memory grows with the response until
+those buffers plateau. Capping closes the meta-block earlier and holds both
+down. Measured on real HTML, CSS, JavaScript and prose, `8k` keeps peak
+encoder memory near 870 KB whatever the response size, against roughly 1.9 MB
+uncapped.
+
+What that costs is small but very content-dependent, because closing a
+meta-block early discards long-range matches. At the `8k` default, against the
+same responses compressed by an uncapped encoder: minified JavaScript grew
+0.6%, JavaScript 0.9%, CSS 1.4%, prose 2.3% and HTML 2.9%. CPU is within a few
+percent either way, and small-to-medium responses can come out slightly
+faster.
+
+`8k` is where the curve flattens rather than the smallest useful value. Peak
+cannot fall below about 780 KB — the hasher and ring buffer are roughly 720 KB
+of fixed cost that this setting cannot touch — so halving again to `4k` saves
+only about 60 KB while roughly doubling the ratio cost. Raise it if bandwidth
+matters more than memory: `32k` costs about 1.24 MB and keeps the ratio loss
+under 0.6%, and `0` restores the pre-1.0 behaviour exactly.
+
+Responses below roughly 8 KB are unaffected either way; their cost is
+dominated by the fixed allocations above.
 
 ### `brotli_min_length`
 

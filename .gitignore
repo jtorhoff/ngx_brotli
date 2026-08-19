@@ -6,5 +6,6 @@ deps/brotli/out/
 # and error logs, which record client addresses, alongside the corpus; tmp
 # holds response bodies; nginx is the source tree script/build.sh clones.
 script/test/
+script/__pycache__/
 tmp/
 nginx/

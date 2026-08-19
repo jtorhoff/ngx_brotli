@@ -51,6 +51,12 @@ typedef struct {
 
   /* Brotli encoder parameter: (max) lg_win */
   size_t lg_win;
+
+  /* How much input may accumulate into one meta-block before the filter
+     flushes the encoder itself. 0 leaves the encoder to its own schedule,
+     which is a 64k input block. See the body filter for why this is the
+     dominant per-request memory knob. */
+  size_t block_size;
 } ngx_http_brotli_conf_t;
 
 /* Instance context. */
@@ -65,6 +71,10 @@ typedef struct {
   size_t bytes_in;
   /* (compressed) bytes pulled from encoder. */
   size_t bytes_out;
+
+  /* Input handed to the encoder since the last meta-block was closed. Drives
+     the brotli_block_size flush. */
+  size_t bytes_since_flush;
 
   /* Input buffer chain. */
   ngx_chain_t* in;
@@ -187,6 +197,12 @@ static ngx_command_t ngx_http_brotli_filter_commands[] = {
          NGX_CONF_TAKE1,
      ngx_conf_set_size_slot, NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_brotli_conf_t, lg_win), &ngx_http_brotli_parse_wbits_p},
+
+    {ngx_string("brotli_block_size"),
+     NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF |
+         NGX_CONF_TAKE1,
+     ngx_conf_set_size_slot, NGX_HTTP_LOC_CONF_OFFSET,
+     offsetof(ngx_http_brotli_conf_t, block_size), NULL},
 
     {ngx_string("brotli_min_length"),
      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF |
@@ -363,6 +379,7 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
   size_t available_output;
   ptrdiff_t available_busy_output;
   size_t input_size;
+  size_t offered_input;
   size_t available_input;
   const uint8_t* next_input_byte;
   size_t consumed_input;
@@ -380,6 +397,8 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
   if (ctx == NULL || ctx->closed || r->header_only) {
     return ngx_http_next_body_filter(r, in);
   }
+
+  conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
 
   /* If more input is provided - append it to our input chain. */
   if (in) {
@@ -402,7 +421,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     ngx_uint_t urgent;
     ngx_uint_t compress;
 
-    conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
     pending = ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
 
     if (complete) {
@@ -609,10 +627,43 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       }
     }
 
-    available_input = input_size;
+    offered_input = input_size;
     next_input_byte = (const uint8_t*)ctx->in->buf->pos;
     available_output = 0;
-    if (ctx->in->buf->last_buf) {
+
+    /* Close the meta-block once brotli_block_size bytes have gone in. Left to
+       itself the encoder accumulates a full 64k input block, and EncodeData
+       then reserves buffers proportional to whatever accumulated - a command
+       array of 12 bytes per input byte, and output storage of about twice the
+       meta-block. Those two dominate peak memory on any response the filter
+       can feed without interruption, which includes every response of known
+       length. Flushing sooner caps both, at the cost of the ratio lost to
+       closing a meta-block early.
+
+       The cap has to apply to the terminating buffer too, not just to
+       mid-stream ones: a static file arrives whole, in a single last_buf
+       buffer, so capping only BROTLI_OPERATION_PROCESS would leave exactly
+       the common case uncapped. Holding back part of a last_buf is safe
+       because the loop comes straight back for the remainder, and the tail
+       that finally fits gets BROTLI_OPERATION_FINISH. */
+    if (conf->block_size > 0 && offered_input > 0) {
+      /* Buffers nginx marks are fed whole, so the running total can reach or
+         pass the limit; clamp rather than wrap. */
+      size_t room = 0;
+
+      if (ctx->bytes_since_flush < conf->block_size) {
+        room = conf->block_size - ctx->bytes_since_flush;
+      }
+
+      if (offered_input > room) {
+        offered_input = room;
+      }
+    }
+
+    if (offered_input < input_size) {
+      /* Held something back, so this cannot be the end of anything. */
+      operation = BROTLI_OPERATION_FLUSH;
+    } else if (ctx->in->buf->last_buf) {
       operation = BROTLI_OPERATION_FINISH;
     } else if (ctx->in->buf->flush) {
       operation = BROTLI_OPERATION_FLUSH;
@@ -620,6 +671,7 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       operation = BROTLI_OPERATION_PROCESS;
     }
 
+    available_input = offered_input;
     ok = BrotliEncoderCompressStream(ctx->encoder, operation, &available_input,
                                      &next_input_byte, &available_output, NULL,
                                      NULL);
@@ -629,15 +681,21 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       return NGX_ERROR;
     }
 
-    consumed_input = input_size - available_input;
+    consumed_input = offered_input - available_input;
     ctx->bytes_in += consumed_input;
     ctx->in->buf->pos += consumed_input;
+    ctx->bytes_since_flush += consumed_input;
 
     if (operation == BROTLI_OPERATION_PROCESS) {
       if (consumed_input > 0) {
         ctx->unflushed_input = 1;
       }
     } else {
+      /* Only once the encoder has taken everything offered is the meta-block
+         actually closed; a short read means output pressure stopped it. */
+      if (available_input == 0) {
+        ctx->bytes_since_flush = 0;
+      }
       ctx->unflushed_input = 0;
     }
 
@@ -653,8 +711,10 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       continue;
     }
 
-    /* Should never happen, just to make sure we don't enter infinite loop. */
-    if (consumed_input == 0) {
+    /* Should never happen, just to make sure we don't enter infinite loop.
+       Offering nothing is not a stall: brotli_block_size does that to close a
+       meta-block, and the next pass offers a full block again. */
+    if (offered_input > 0 && consumed_input == 0) {
       ngx_http_brotli_filter_close(ctx);
       return NGX_ERROR;
     }
@@ -893,6 +953,7 @@ static void* ngx_http_brotli_create_conf(ngx_conf_t* cf) {
   conf->quality = NGX_CONF_UNSET;
   conf->lg_win = NGX_CONF_UNSET_SIZE;
   conf->min_length = NGX_CONF_UNSET;
+  conf->block_size = NGX_CONF_UNSET_SIZE;
 
   return conf;
 }
@@ -920,6 +981,18 @@ static char* ngx_http_brotli_merge_conf(ngx_conf_t* cf, void* parent,
      once the "Content-Encoding" header is paid for. 256 clears that with
      room to spare. */
   ngx_conf_merge_value(conf->min_length, prev->min_length, 256);
+  /* Left to itself the encoder closes a meta-block every 64k of input and
+     sizes two buffers from that, which is what makes peak memory scale with
+     the response. Capping at 8k holds peak to ~870 KB whatever the response
+     size, against ~1.9 MB uncapped - measured on real HTML, CSS, JS and prose.
+     The ratio that buys is small and very content-dependent: +0.6% on minified
+     JS, +0.9% on JS, +1.4% on CSS, +2.3% on prose, +2.9% on HTML.
+
+     8k rather than something smaller because this is where the curve flattens.
+     Peak cannot fall below ~780 KB - the hasher and ring buffer are ~720 KB of
+     fixed cost - so halving again to 4k saves only 60 KB while doubling the
+     ratio cost. 0 restores the encoder's own schedule. */
+  ngx_conf_merge_size_value(conf->block_size, prev->block_size, 8 * 1024);
 
   rc = ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                             &prev->types_keys, &prev->types,

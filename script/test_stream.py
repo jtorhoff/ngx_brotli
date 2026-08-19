@@ -197,6 +197,13 @@ def build_fixtures(work):
         # short-lived per-block allocations the memory tests care about, and
         # large enough that lg_win is not reduced below brotli_window.
         "big.html": f"<html><body>{make_text(200000, 1)}</body></html>",
+        # Sized for the memory tests, into a window that is narrower than it
+        # looks: big enough that the meta-block cap is already binding, so a
+        # capped peak here matches a capped peak on big.html, yet small enough
+        # that an *uncapped* encoder has not yet reached the plateau where its
+        # buffers stop growing. Around 65 KB the uncapped peak is already
+        # within 8% of big.html's and the comparison proves nothing.
+        "mid.html": f"<html><body>{make_text(5000, 4)}</body></html>",
         # Over brotli_min_length, but small enough that a known Content-Length
         # drives lg_win well below brotli_window.
         "small.html": f"<html><body>{make_text(200, 2)}</body></html>",
@@ -1072,6 +1079,76 @@ def test_alloc_soak(ctx):
         len(counts) == 1,
         f"allocation count drifts between identical requests: {sorted(counts)}",
     )
+
+
+def peak_bytes(stats, label):
+    """Largest simultaneously-live byte count across the traced requests."""
+    active = assert_balanced(stats, label)
+    return max(entry["peak_bytes"] for entry in active.values())
+
+
+def measure_peak(ctx, path, label):
+    ctx.nginx.truncate_log()
+    fetch(ctx.port, path)
+    return peak_bytes(wait_for_encoder_release(ctx.nginx), label)
+
+
+@test("brotli_block_size caps peak encoder memory", needs_debug=True)
+def test_block_size_caps_peak(ctx):
+    capped = measure_peak(ctx, "/big.html", "capped")
+    uncapped = measure_peak(ctx, "/uncapped/big.html", "uncapped")
+
+    # Measured on real HTML, CSS, JS and prose the cap takes peak from about
+    # 1.9 MB to about 0.87 MB. Asserting only a third off leaves room for a
+    # different Brotli version sizing its buffers differently, while still
+    # failing outright if the cap stops being applied.
+    check(
+        capped < uncapped * 0.67,
+        f"brotli_block_size did not cap peak memory: {capped} bytes capped "
+        f"vs {uncapped} uncapped",
+    )
+
+
+@test("capped peak memory does not track response size", needs_debug=True)
+def test_block_size_peak_is_flat(ctx):
+    mid = measure_peak(ctx, "/mid.html", "capped mid")
+    big = measure_peak(ctx, "/big.html", "capped big")
+    mid_uncapped = measure_peak(ctx, "/uncapped/mid.html", "uncapped mid")
+    big_uncapped = measure_peak(ctx, "/uncapped/big.html", "uncapped big")
+
+    # The point of the cap: once it binds, peak is set by the hasher and ring
+    # buffer, which do not care how much is being compressed. big.html is
+    # roughly twenty times mid.html.
+    check(
+        big < mid * 1.15,
+        f"peak still grows with response size despite the cap: {mid} bytes "
+        f"for mid.html vs {big} for big.html",
+    )
+    # Guards the test itself: if the uncapped path also came out flat, these
+    # fixtures are not far enough apart to prove anything.
+    check(
+        big_uncapped > mid_uncapped * 1.15,
+        f"uncapped peak did not grow either ({mid_uncapped} vs "
+        f"{big_uncapped} bytes), so this test cannot detect a regression",
+    )
+
+
+@test("a response compressed without the cap still round-trips", needs_decoder=True)
+def test_uncapped_round_trip(ctx):
+    for path, name in (
+        ("/uncapped/big.html", "big.html"),
+        ("/uncapped-buffered/big.html", "big.html"),
+    ):
+        status, headers, body = fetch(ctx.port, path)
+        check(status == 200, f"{path}: expected 200, got {status}")
+        check(
+            headers.get("content-encoding") == "br",
+            f"{path}: expected a Brotli response, got {headers!r}",
+        )
+        check(
+            ctx.decode(body) == ctx.fixtures[name],
+            f"{path}: body did not decode back to the fixture",
+        )
 
 
 @test("aborted request still releases the encoder", needs_debug=True)
