@@ -57,7 +57,7 @@ PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 REGISTRY = []
 
 
-def test(name, needs_decoder=False, needs_debug=False):
+def test(name, needs_decoder=False, needs_debug=False, needs_corpus=False):
     """Registers a test. The body raises Failure to report a failure."""
 
     def register(fn):
@@ -67,6 +67,7 @@ def test(name, needs_decoder=False, needs_debug=False):
                 "fn": fn,
                 "needs_decoder": needs_decoder,
                 "needs_debug": needs_debug,
+                "needs_corpus": needs_corpus,
             }
         )
         return fn
@@ -187,6 +188,27 @@ def make_text(word_count, seed):
     return " ".join(rng.choice(WORDS) for _ in range(word_count))
 
 
+# Real-world files, checked in under script/corpus. Everything else here is
+# make_text() output, which is a poor stand-in for the web: random words drawn
+# from a small list repeat at long range, so they compress far better and far
+# more predictably than real markup or code. See corpus/PROVENANCE.md.
+CORPUS = os.path.join(ROOT, "script", "corpus")
+CORPUS_FILES = ("wiki.html", "site.css", "app.js", "app.min.js", "prose.txt")
+
+
+def load_corpus():
+    """Returns {name: bytes}, or {} if the corpus is not present."""
+    corpus = {}
+    for name in CORPUS_FILES:
+        path = os.path.join(CORPUS, name)
+        try:
+            with open(path, "rb") as handle:
+                corpus[name] = handle.read()
+        except FileNotFoundError:
+            return {}
+    return corpus
+
+
 def build_fixtures(work):
     html = os.path.join(work, "html")
     os.makedirs(html, exist_ok=True)
@@ -212,7 +234,15 @@ def build_fixtures(work):
     for name, content in files.items():
         with open(os.path.join(html, name), "w") as handle:
             handle.write(content)
-    return {name: content.encode() for name, content in files.items()}
+
+    fixtures = {name: content.encode() for name, content in files.items()}
+
+    for name, blob in load_corpus().items():
+        with open(os.path.join(html, name), "wb") as handle:
+            handle.write(blob)
+        fixtures[name] = blob
+
+    return fixtures
 
 
 def render_conf(work, port, upstream_port):
@@ -619,6 +649,64 @@ def test_static_roundtrip(ctx):
         f"({len(original)})",
     )
     check(ctx.decode(body) == original, "decoded body differs from the original")
+
+
+def check_corpus_roundtrip(ctx, name, path=None):
+    """Fetches one corpus file, and checks it compressed and decodes back."""
+    path = path or f"/{name}"
+    original = ctx.fixtures[name]
+
+    status, headers, body = fetch(ctx.port, path)
+    check(status == 200, f"{path}: expected 200, got {status}")
+    check(
+        headers.get("content-encoding") == "br",
+        f"{path}: expected Content-Encoding: br, got "
+        f"{headers.get('content-encoding')!r}",
+    )
+    check(
+        len(body) < len(original),
+        f"{path}: compressed body ({len(body)}) is not smaller than the "
+        f"original ({len(original)})",
+    )
+    check(ctx.decode(body) == original, f"{path}: decoded body differs")
+
+
+@test("real HTML round-trips", needs_decoder=True, needs_corpus=True)
+def test_corpus_html(ctx):
+    check_corpus_roundtrip(ctx, "wiki.html")
+
+
+@test("real CSS round-trips", needs_decoder=True, needs_corpus=True)
+def test_corpus_css(ctx):
+    check_corpus_roundtrip(ctx, "site.css")
+
+
+@test("real JavaScript round-trips", needs_decoder=True, needs_corpus=True)
+def test_corpus_js(ctx):
+    check_corpus_roundtrip(ctx, "app.js")
+
+
+@test("real minified JavaScript round-trips", needs_decoder=True, needs_corpus=True)
+def test_corpus_min_js(ctx):
+    check_corpus_roundtrip(ctx, "app.min.js")
+
+
+@test("real prose round-trips", needs_decoder=True, needs_corpus=True)
+def test_corpus_prose(ctx):
+    check_corpus_roundtrip(ctx, "prose.txt")
+
+
+@test(
+    "the whole corpus round-trips as streams of unknown length",
+    needs_decoder=True,
+    needs_corpus=True,
+)
+def test_corpus_streamed(ctx):
+    # The static path above sizes the window from a known Content-Length and
+    # feeds the encoder whole buffers. Unknown-length responses take neither
+    # route, so real content has to cross that path too.
+    for name in CORPUS_FILES:
+        check_corpus_roundtrip(ctx, name, path=f"/stream/{name}")
 
 
 @test("streamed response of unknown length round-trips", needs_decoder=True)
@@ -1134,6 +1222,7 @@ def main():
     nginx_bin = locate_nginx(args.nginx)
     version, has_debug = nginx_build_info(nginx_bin)
     decode = locate_decoder()
+    has_corpus = bool(load_corpus())
 
     for port in (args.port, args.upstream_port):
         if not port_is_free(port):
@@ -1142,6 +1231,7 @@ def main():
     print(f"nginx:   {nginx_bin}")
     print(f"build:   {version}{'' if has_debug else '   (no --with-debug)'}")
     print(f"decoder: {'available' if decode else 'MISSING'}")
+    print(f"corpus:  {'present' if has_corpus else 'MISSING (script/corpus)'}")
     if not has_debug:
         print("         window and memory tests need --with-debug; skipping them.")
     if not decode:
@@ -1171,6 +1261,8 @@ def main():
                 results.append((SKIP, name, "no brotli decoder available"))
             elif entry["needs_debug"] and not has_debug:
                 results.append((SKIP, name, "nginx lacks --with-debug"))
+            elif entry["needs_corpus"] and not has_corpus:
+                results.append((SKIP, name, "script/corpus is missing"))
             else:
                 try:
                     entry["fn"](ctx)

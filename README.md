@@ -309,6 +309,35 @@ encoder's allocator tracing out of the debug log, so build nginx with
 Round-trip tests need a brotli decoder, either the python `brotli` module or
 the CLI that `script/build.sh` builds into `deps/brotli/out`.
 
+### Corpus and benchmark
+
+`script/corpus` holds real-world files - a rendered Wikipedia article, a
+Tailwind stylesheet, React's development and production builds, and English
+prose - checked in so the suite is deterministic offline. `test_stream.py`
+round-trips each of them, over both the known-length and the unknown-length
+path. Their provenance and licences are in
+[`script/corpus/PROVENANCE.md`](script/corpus/PROVENANCE.md).
+
+They exist because the generated fixtures are a poor stand-in for the web:
+`make_text()` emits random words drawn from a small list, which repeat at long
+range and so compress far better, and far more predictably, than real markup
+or code. Measured against this corpus, a synthetic one overstated the cost of
+a compression change roughly fourfold.
+
+`script/bench_corpus.py` reports what the filter actually achieves on them:
+
+```bash
+python3 script/bench_corpus.py
+python3 script/bench_corpus.py --quality 4,5,6 --window 16k,64k
+```
+
+It is a measurement tool rather than a test - a compression ratio has no pass
+or fail, and the numbers move with the vendored Brotli version - so it asserts
+nothing and CI does not run it. Reach for it when tuning a default, and put
+the table in the commit message. Note that its timings are only meaningful on
+a release build: a `--with-debug` nginx logs a line per encoder allocation,
+which costs more than the compression being measured.
+
 ## Contributing
 
 See [Contributing](CONTRIBUTING.md).
