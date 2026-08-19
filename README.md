@@ -23,8 +23,6 @@ ngx_brotli is a set of two nginx modules:
   - [`brotli_comp_level`](#brotli_comp_level)
   - [`brotli_window`](#brotli_window)
   - [`brotli_min_length`](#brotli_min_length)
-- [Variables](#variables)
-  - [`$brotli_ratio`](#brotli_ratio)
 - [Sample configuration](#sample-configuration)
 - [Tests](#tests)
 - [Contributing](#contributing)
@@ -47,6 +45,15 @@ straight out of the encoder's own buffer rather than copied into a pool of
 them. Note that nginx treats an unknown directive as a fatal configuration
 error, so a config still carrying `brotli_buffers` will refuse to start after
 upgrading rather than warn — delete the line.
+
+The `$brotli_ratio` variable has been removed. It reported the compression
+ratio achieved for a request, which meant carrying two counters through the
+body filter for the whole of every compressed response. There is no drop-in
+replacement: `$body_bytes_sent` gives the compressed size, but the
+uncompressed size it would be measured against is no longer available to the
+log. This breaks the same way `brotli_buffers` does: nginx resolves variables
+when it parses the configuration, so a `log_format` still naming
+`$brotli_ratio` will refuse to start rather than log an empty field.
 
 ## Installation
 
@@ -249,13 +256,6 @@ about 128 bytes the compressed body plus the `Content-Encoding` header comes
 out larger than the original. Note that a response of unknown length is
 compressed regardless of this setting, since there is nothing to compare
 against when the response headers are sent.
-
-## Variables
-
-### `$brotli_ratio`
-
-Achieved compression ratio, computed as the ratio between the original
-and compressed response sizes.
 
 ## Sample configuration
 

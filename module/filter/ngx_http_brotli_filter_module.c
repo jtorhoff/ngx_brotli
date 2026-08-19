@@ -59,11 +59,6 @@ typedef struct {
   /* Payload length; -1, if unknown. */
   off_t content_length;
 
-  /* (uncompressed) bytes pushed to encoder. */
-  size_t bytes_in;
-  /* (compressed) bytes pulled from encoder. */
-  size_t bytes_out;
-
   /* Input buffer chain. */
   ngx_chain_t* in;
 
@@ -84,8 +79,6 @@ typedef struct {
   unsigned initialized : 1;
   /* 1 if compression is finished / failed. */
   unsigned closed : 1;
-  /* 1 if compression is finished. */
-  unsigned success : 1;
 
   /* 1 if out_chain is ready to be committed, 0 otherwise. */
   unsigned output_ready : 1;
@@ -130,11 +123,6 @@ static void ngx_http_brotli_filter_cleanup(void* data);
 static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t* r,
                                                      ngx_http_brotli_ctx_t* ctx,
                                                      ngx_uint_t compress);
-
-static ngx_int_t ngx_http_brotli_add_variables(ngx_conf_t* cf);
-static ngx_int_t ngx_http_brotli_ratio_variable(ngx_http_request_t* r,
-                                                ngx_http_variable_value_t* v,
-                                                uintptr_t data);
 
 static void* ngx_http_brotli_create_conf(ngx_conf_t* cf);
 static char* ngx_http_brotli_merge_conf(ngx_conf_t* cf, void* parent,
@@ -189,8 +177,8 @@ static ngx_command_t ngx_http_brotli_filter_commands[] = {
 
 /* Module context hooks. */
 static ngx_http_module_t ngx_http_brotli_filter_module_ctx = {
-    ngx_http_brotli_add_variables, /* pre-configuration */
-    ngx_http_brotli_filter_init,   /* post-configuration */
+    NULL,                        /* pre-configuration */
+    ngx_http_brotli_filter_init, /* post-configuration */
 
     NULL, /* create main configuration */
     NULL, /* init main configuration */
@@ -216,9 +204,6 @@ ngx_module_t ngx_http_brotli_filter_module = {
     NULL,                               /* exit process */
     NULL,                               /* exit master */
     NGX_MODULE_V1_PADDING};
-
-/* Variable names. */
-static ngx_str_t ngx_http_brotli_ratio = ngx_string("brotli_ratio");
 
 /* Next filter in the filter chain. */
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
@@ -523,7 +508,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
       ctx->out_buf->pos = out;
       ctx->out_buf->last = out + available_output;
       ctx->out_buf->end = out + available_output;
-      ctx->bytes_out += available_output;
       ctx->out_buf->last_buf = 0;
       ctx->out_buf->flush = 0;
       if (ctx->end_of_input && BrotliEncoderIsFinished(ctx->encoder)) {
@@ -542,7 +526,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     }
 
     if (BrotliEncoderIsFinished(ctx->encoder)) {
-      ctx->success = 1;
       r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
       ngx_http_brotli_filter_close(ctx);
       return NGX_OK;
@@ -621,7 +604,6 @@ static ngx_int_t ngx_http_brotli_body_filter(ngx_http_request_t* r,
     }
 
     consumed_input = input_size - available_input;
-    ctx->bytes_in += consumed_input;
     ctx->in->buf->pos += consumed_input;
 
     if (operation == BROTLI_OPERATION_PROCESS) {
@@ -810,60 +792,6 @@ static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t* ctx) {
     ngx_pfree(ctx->request->pool, ctx->out_buf);
     ctx->out_buf = NULL;
   }
-}
-
-static ngx_int_t ngx_http_brotli_add_variables(ngx_conf_t* cf) {
-  ngx_http_variable_t* var;
-
-  var = ngx_http_add_variable(cf, &ngx_http_brotli_ratio, 0);
-  if (var == NULL) {
-    return NGX_ERROR;
-  }
-
-  var->get_handler = ngx_http_brotli_ratio_variable;
-
-  return NGX_OK;
-}
-
-static ngx_int_t ngx_http_brotli_ratio_variable(ngx_http_request_t* r,
-                                                ngx_http_variable_value_t* v,
-                                                uintptr_t data) {
-  ngx_uint_t ratio_int;
-  ngx_uint_t ratio_frac;
-  ngx_http_brotli_ctx_t* ctx;
-
-  v->valid = 1;
-  v->no_cacheable = 0;
-  v->not_found = 0;
-
-  ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
-
-  /* Only report variable on non-failing streams. */
-  if (ctx == NULL || !ctx->success) {
-    v->not_found = 1;
-    return NGX_OK;
-  }
-
-  v->data = ngx_pnalloc(r->pool, NGX_INT32_LEN + 3);
-  if (v->data == NULL) {
-    return NGX_ERROR;
-  }
-
-  ratio_int = (ngx_uint_t)(ctx->bytes_in / ctx->bytes_out);
-  ratio_frac = (ngx_uint_t)((ctx->bytes_in * 100 / ctx->bytes_out) % 100);
-
-  /* Rounding; e.g. 2.125 to 2.13 */
-  if ((ctx->bytes_in * 1000 / ctx->bytes_out) % 10 > 4) {
-    ratio_frac++;
-    if (ratio_frac > 99) {
-      ratio_int++;
-      ratio_frac = 0;
-    }
-  }
-
-  v->len = ngx_sprintf(v->data, "%ui.%02ui", ratio_int, ratio_frac) - v->data;
-
-  return NGX_OK;
 }
 
 static void* ngx_http_brotli_create_conf(ngx_conf_t* cf) {
