@@ -127,20 +127,20 @@ typedef struct {
 
 static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
     ngx_http_request_t *r, ngx_http_brotli_ctx_t *ctx);
-static void   ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t *ctx);
+static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t *ctx);
 static size_t ngx_http_brotli_filter_pending_input(ngx_chain_t *in,
     ngx_uint_t *complete, ngx_uint_t *urgent);
 
 static void *ngx_http_brotli_filter_alloc(void *opaque, size_t size);
-static void  ngx_http_brotli_filter_free(void *opaque, void *address);
-static void  ngx_http_brotli_filter_cleanup(void *data);
+static void ngx_http_brotli_filter_free(void *opaque, void *address);
+static void ngx_http_brotli_filter_cleanup(void *data);
 
 static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     ngx_http_brotli_ctx_t *ctx, ngx_uint_t compress);
 
-static void     *ngx_http_brotli_create_conf(ngx_conf_t *cf);
-static char     *ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent,
-        void *child);
+static void *ngx_http_brotli_create_conf(ngx_conf_t *cf);
+static char *ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent,
+    void *child);
 static ngx_int_t ngx_http_brotli_filter_init(ngx_conf_t *cf);
 
 static char *ngx_http_brotli_parse_wbits(ngx_conf_t *cf, void *post,
@@ -759,7 +759,6 @@ ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_request_t *r,
     if (ctx->initialized) {
         return NGX_OK;
     }
-    ctx->initialized = 1;
 
     conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
 
@@ -820,6 +819,13 @@ ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_request_t *r,
     }
     ctx->out_chain->buf = ctx->out_buf;
     ctx->out_chain->next = NULL;
+
+    /* Last, so that the flag means what it says: the encoder exists and both
+       output objects are allocated. Every failure above returns NGX_ERROR
+       with it still clear, and the caller closes the stream on that, so the
+       half-built state is never seen again - ctx->closed makes every later
+       call a straight hand-off. */
+    ctx->initialized = 1;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
         "brotli encoder initialized: lvl:%i win:%d", conf->quality,
