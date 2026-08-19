@@ -20,7 +20,6 @@ ngx_brotli is a set of two nginx modules:
   - [`brotli_static`](#brotli_static)
   - [`brotli`](#brotli)
   - [`brotli_types`](#brotli_types)
-  - [`brotli_buffers`](#brotli_buffers)
   - [`brotli_comp_level`](#brotli_comp_level)
   - [`brotli_window`](#brotli_window)
   - [`brotli_min_length`](#brotli_min_length)
@@ -41,6 +40,13 @@ cutting per-request encoder memory by roughly 70% at the cost of a few percent
 of compression, and `brotli_min_length` is now `256` rather than `20`, so very
 small responses are no longer compressed at all. Set either explicitly to keep
 the old behaviour.
+
+`brotli_buffers` has been removed. It had been accepted and ignored for years,
+and this module no longer has anything for it to configure: output is handed
+straight out of the encoder's own buffer rather than copied into a pool of
+them. Note that nginx treats an unknown directive as a fatal configuration
+error, so a config still carrying `brotli_buffers` will refuse to start after
+upgrading rather than warn — delete the line.
 
 ## Installation
 
@@ -197,14 +203,6 @@ in one go it matters little, since a full block is available almost at once.
 Enables on-the-fly compression of responses for the specified MIME types
 in addition to `text/html`. The special value `*` matches any MIME type.
 Responses with the `text/html` MIME type are always compressed.
-
-### `brotli_buffers`
-
-- **syntax**: `brotli_buffers <number> <size>`
-- **default**: `32 4k|16 8k`
-- **context**: `http`, `server`, `location`
-
-**Deprecated**, ignored.
 
 ### `brotli_comp_level`
 
