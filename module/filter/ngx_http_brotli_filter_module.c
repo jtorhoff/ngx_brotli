@@ -44,8 +44,6 @@ typedef struct {
   /* Minimal required length for compression (if known). */
   ssize_t min_length;
 
-  ngx_bufs_t deprecated_unused_bufs;
-
   /* Brotli encoder parameter: quality */
   ngx_int_t quality;
 
@@ -170,13 +168,6 @@ static ngx_command_t ngx_http_brotli_filter_commands[] = {
          NGX_HTTP_LIF_CONF | NGX_CONF_FLAG,
      ngx_conf_set_flag_slot, NGX_HTTP_LOC_CONF_OFFSET,
      offsetof(ngx_http_brotli_conf_t, enable), NULL},
-
-    /* Deprecated, unused. */
-    {ngx_string("brotli_buffers"),
-     NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF |
-         NGX_CONF_TAKE2,
-     ngx_conf_set_bufs_slot, NGX_HTTP_LOC_CONF_OFFSET,
-     offsetof(ngx_http_brotli_conf_t, deprecated_unused_bufs), NULL},
 
     {ngx_string("brotli_types"),
      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF |
@@ -944,7 +935,6 @@ static void* ngx_http_brotli_create_conf(ngx_conf_t* cf) {
   }
 
   /* ngx_pcalloc fills result with zeros ->
-       conf->bufs.num = 0;
        conf->types = { NULL };
        conf->types_keys = NULL; */
 
