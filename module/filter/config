@@ -70,7 +70,7 @@ BROTLI_ENC_H="$brotli/include/brotli/encode.h \
 
 # Shared with the static module. Listed as a dependency so that editing it
 # actually rebuilds this module.
-BROTLI_COMMON_H="$BROTLI_MODULE_SRC_DIR/../common/ngx_http_brotli_accept_encoding.h"
+BROTLI_COMMON_H="$BROTLI_MODULE_SRC_DIR/../common/ngx_http_brotli_headers.h"
 
 
 ngx_module_incs="$brotli/include"

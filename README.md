@@ -32,13 +32,19 @@ ngx_brotli is a set of two nginx modules:
 
 Both Brotli library and nginx module are under active development.
 
-Two defaults have changed in favour of a smaller memory footprint, which is
-worth knowing when upgrading. `brotli_window` is now `64k` rather than `512k`,
-cutting per-request encoder memory by 58% on a response of known length and
-75% on a streamed one, at a cost in compression of 1.6% over `script/corpus`
-and 2.7% at its worst; and `brotli_min_length` is now `256` rather than `20`,
-so very small responses are no longer compressed at all. Set either explicitly to keep
-the old behaviour.
+Three defaults have changed, which is worth knowing when upgrading. Set any of
+them explicitly to keep the old behaviour.
+
+Two went in favour of a smaller memory footprint. `brotli_window` is now `64k`
+rather than `512k`, cutting per-request encoder memory by 58% on a response of
+known length and 75% on a streamed one, at a cost in compression of 1.1% over
+`script/corpus` and 2.4% at its worst when paired with the new quality default
+below; and `brotli_min_length` is now `256` rather than `20`, so very small
+responses are no longer compressed at all.
+
+The third went in favour of latency. `brotli_comp_level` is now `4` rather
+than `6`, which over the same corpus produces 7.4% more bytes for a little
+over half the encoder time. This one does not affect memory.
 
 `brotli_buffers` has been removed. It had been accepted and ignored for years,
 and this module no longer has anything for it to configure: output is handed
@@ -217,11 +223,18 @@ Responses with the `text/html` MIME type are always compressed.
 ### `brotli_comp_level`
 
 - **syntax**: `brotli_comp_level <level>`
-- **default**: `6`
+- **default**: `4`
 - **context**: `http`, `server`, `location`
 
 Sets on-the-fly compression Brotli quality (compression) `level`.
 Acceptable values are in the range from `0` to `11`.
+
+The default trades compression for encoder time. Over `script/corpus`,
+quality `4` produces 7.4% more bytes than `6` for a little over half the CPU.
+Peak encoder memory does not change with this setting. If you serve mostly
+cacheable assets, or sit behind a CDN, a higher level is likely the better
+trade — `5` in particular costs only 0.8% in size against `6` while saving
+20% of the time.
 
 ### `brotli_window`
 
@@ -252,6 +265,11 @@ because it only matters where a match would have reached back further than
 | HTML | 29,339 | 28,556 | +2.74% |
 | **whole corpus** | **212,327** | **209,009** | **+1.59%** |
 
+Those figures are at `brotli_comp_level 6`. The cost falls as the quality
+does, because a lower level finds fewer of the long-range matches a smaller
+window gives up: at the default of `4` the same change costs `+1.07%` over the
+corpus and `+2.44%` on its worst file.
+
 Raise it if responses are large and bandwidth matters more than memory; a
 window larger than the response body buys nothing. Note that when the response
 length is known the module already lowers the window to fit, so this setting
@@ -277,7 +295,7 @@ against when the response headers are sent.
 
 ```
 brotli on;
-brotli_comp_level 6;
+brotli_comp_level 4;
 brotli_static on;
 
 # brotli_static probes for <path>.br on every request; these two keep a

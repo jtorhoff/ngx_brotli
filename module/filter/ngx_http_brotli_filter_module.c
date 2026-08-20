@@ -8,7 +8,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../common/ngx_http_brotli_accept_encoding.h"
+#include "../common/ngx_http_brotli_headers.h"
 
 #if (NGX_HAVE_BROTLI_ENC_ENCODE_H)
 #include <brotli/enc/encode.h>
@@ -79,6 +79,21 @@ typedef enum {
     NGX_HTTP_BROTLI_STEP_FAILED
 } ngx_http_brotli_step_e;
 
+/* What the body filter should do once ngx_http_brotli_filter_prepare has
+   settled the decisions that come before the encoder. This is deliberately
+   not an ngx_int_t: the alternative was a sentinel return code, which would
+   have had to be a value no filter below could ever hand back, and nothing
+   but a comment would have kept that true. */
+typedef enum {
+    /* The call is accepted for encoding: nothing left to settle, so carry on
+       into the encoder loop. */
+    NGX_HTTP_BROTLI_ACCEPT = 0,
+    /* The call is not encoded here - the response is being passed through, or
+       there is not yet enough of it to judge. Either way this call is over and
+       the body filter returns what prepare stored in "rc". */
+    NGX_HTTP_BROTLI_REJECT
+} ngx_http_brotli_prepare_e;
+
 /* Instance context. */
 typedef struct {
     /* Brotli encoder instance. */
@@ -115,6 +130,10 @@ typedef struct {
        block fills, so it has to be flushed explicitly when the caller wants
        output. */
     unsigned unflushed_input : 1;
+    /* 1 if this call of the body filter arrived with no new data, i.e. nginx
+       is asking for progress on what it has already handed over rather than
+       adding to it. Set once per call, before the loop runs. */
+    unsigned caller_wants_output : 1;
 
     /* State of out_buf. ngx_pcalloc starts it at IDLE. */
     ngx_http_brotli_output_e output;
@@ -315,8 +334,6 @@ static ngx_int_t
 ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     ngx_http_brotli_ctx_t *ctx, ngx_uint_t compress)
 {
-    ngx_table_elt_t *h;
-
     ctx->headers_postponed = 0;
 
     if (!compress) {
@@ -327,18 +344,9 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     }
 
     /* Tell the filters below that the body is compressed. */
-    h = ngx_list_push(&r->headers_out.headers);
-    if (h == NULL) {
+    if (ngx_http_brotli_set_content_encoding(r) != NGX_OK) {
         return NGX_ERROR;
     }
-
-    h->hash = 1;
-#if nginx_version >= 1023000
-    h->next = NULL;
-#endif
-    ngx_str_set(&h->key, "Content-Encoding");
-    ngx_str_set(&h->value, "br");
-    r->headers_out.content_encoding = h;
 
     ngx_http_clear_content_length(r);
     ngx_http_clear_accept_ranges(r);
@@ -350,32 +358,31 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
 
 /* Hands the committed output buffer to the next filter, and reports whether
    the encoder may be touched again. The encoder must not be, while any of its
-   output is still outstanding: out_buf points into memory Brotli owns. */
+   output is still outstanding: out_buf points into memory Brotli owns.
+
+   The loop calls this only while ctx->output is not IDLE, so the buffer is
+   always in one of two states on entry, and "resend" says which. */
 static ngx_http_brotli_step_e
 ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
 {
     ngx_int_t           rc;
-    ptrdiff_t           available_busy_output;
+    ngx_uint_t          resend;
+    off_t               outstanding;
     ngx_chain_t        *to_send;
     ngx_http_request_t *r;
 
     r = ctx->request;
 
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
-        available_busy_output = ngx_buf_size(ctx->out_buf);
-    } else {
-        available_busy_output = 0;
-    }
-
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
-        to_send = ctx->out_chain;
-    } else {
-        to_send = NULL;
-    }
+    /* READY: freshly filled, so hand the chain over. BUSY: handed over once
+       already and not yet fully consumed, so offer nothing new and see
+       whether the filters below have moved any of it. */
+    resend = (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY);
+    to_send = resend ? NULL : ctx->out_chain;
+    outstanding = ngx_buf_size(ctx->out_buf);
 
     rc = ngx_http_next_body_filter(r, to_send);
 
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
+    if (!resend) {
         ctx->output = NGX_HTTP_BROTLI_OUTPUT_BUSY;
     }
     if (ngx_buf_size(ctx->out_buf) == 0) {
@@ -383,8 +390,12 @@ ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
     }
 
     if (rc == NGX_OK) {
-        if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
-            available_busy_output == ngx_buf_size(ctx->out_buf)) {
+        /* A resend that moved nothing means the filters below are holding the
+           buffer and will not take more of it now, so going round again would
+           only ask a second time. A first send is never a stall, however
+           little of it was taken. */
+        if (resend && ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
+            ngx_buf_size(ctx->out_buf) == outstanding) {
             r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
             return NGX_HTTP_BROTLI_STEP_AGAIN;
         }
@@ -447,13 +458,45 @@ ngx_http_brotli_filter_take_output(ngx_http_brotli_ctx_t *ctx)
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
-/* Advances the encoder now that it holds no output: finishes the stream,
-   drains what a flush would release, or pushes the next input buffer in.
-   "in" is the chain this call of the body filter was given, which is NULL
-   when the caller only wants progress - not ctx->in, which is what is left to
-   compress. */
+/* Runs the encoder with no new input, which is how it is made to release what
+   it is already holding: FINISH once the input has ended, FLUSH before then.
+   Which one to use follows from ctx->end_of_input rather than from an
+   argument, because those are the only terms on which either is correct.
+   Both leave output for the next turn of the loop to collect, which is why
+   both mark the connection buffered. */
 static ngx_http_brotli_step_e
-ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
+ngx_http_brotli_filter_drain_encoder(ngx_http_brotli_ctx_t *ctx)
+{
+    size_t                 available_input;
+    size_t                 available_output;
+    BROTLI_BOOL            ok;
+    BrotliEncoderOperation operation;
+
+    if (ctx->end_of_input) {
+        operation = BROTLI_OPERATION_FINISH;
+    } else {
+        operation = BROTLI_OPERATION_FLUSH;
+    }
+
+    available_input = 0;
+    available_output = 0;
+
+    ok = BrotliEncoderCompressStream(ctx->encoder, operation, &available_input,
+        NULL, &available_output, NULL, NULL);
+
+    ctx->request->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+
+    if (!ok) {
+        return NGX_HTTP_BROTLI_STEP_FAILED;
+    }
+
+    return NGX_HTTP_BROTLI_STEP_CONTINUE;
+}
+
+/* Advances the encoder now that it holds no output: finishes the stream,
+   drains what a flush would release, or pushes the next input buffer in. */
+static ngx_http_brotli_step_e
+ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
 {
     ngx_http_request_t    *r;
     size_t                 input_size;
@@ -475,38 +518,21 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
 
     if (ctx->end_of_input) {
         /* Ask the encoder to dump the leftover. */
-        available_input = 0;
-        available_output = 0;
-        ok = BrotliEncoderCompressStream(ctx->encoder, BROTLI_OPERATION_FINISH,
-            &available_input, NULL, &available_output, NULL, NULL);
-        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-        if (!ok) {
-            return NGX_HTTP_BROTLI_STEP_FAILED;
-        }
-        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+        return ngx_http_brotli_filter_drain_encoder(ctx);
     }
 
     if (ctx->in == NULL) {
-        /* A NULL chain means the caller wants whatever we have. If the encoder
-           is holding input that PROCESS will not emit until a block fills, ask
-           for it now: without this a slowly-produced response stalls until
-           64 KB has accumulated. Costs a few percent of ratio, because each
-           flush closes a meta-block early. */
-        if (in == NULL && ctx->unflushed_input) {
-            available_input = 0;
-            available_output = 0;
-            ok = BrotliEncoderCompressStream(ctx->encoder,
-                BROTLI_OPERATION_FLUSH, &available_input, NULL,
-                &available_output, NULL, NULL);
+        /* Nothing left to compress. If the caller is asking for output and the
+           encoder is holding input that PROCESS will not emit until a block
+           fills, ask for it now: without this a slowly-produced response
+           stalls until 64 KB has accumulated. Costs a few percent of ratio,
+           because each flush closes a meta-block early. */
+        if (ctx->caller_wants_output && ctx->unflushed_input) {
             ctx->unflushed_input = 0;
             /* Mark the resulting buffer so the filters below push it out
                rather than holding it for more. */
             ctx->end_of_block = 1;
-            r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-            if (!ok) {
-                return NGX_HTTP_BROTLI_STEP_FAILED;
-            }
-            return NGX_HTTP_BROTLI_STEP_CONTINUE;
+            return ngx_http_brotli_filter_drain_encoder(ctx);
         }
         return NGX_HTTP_BROTLI_STEP_DONE;
     }
@@ -573,19 +599,121 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
-/* Response body filtration (compression). */
-static ngx_int_t
-ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+/* Everything that has to be settled before the encoder can run: committing
+   headers the header filter held back, and deciding whether to go on holding
+   input while the response size is still unknown. Both questions only arise
+   before the steady state, and both are answered from one walk of the input
+   chain.
+
+   Returns NGX_HTTP_BROTLI_ACCEPT when there is nothing left to settle
+   and the caller should carry on into the encoder loop. Otherwise the body
+   filter is done for this call and "*rc" holds what it should return -
+   including the pass-through case, where this has already handed the held
+   input to the next filter. */
+static ngx_http_brotli_prepare_e
+ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
 {
-    ngx_int_t               rc;
-    ngx_http_brotli_ctx_t  *ctx;
+    ngx_int_t               header_rc;
+    ngx_http_request_t     *r;
     ngx_http_brotli_conf_t *conf;
-    ngx_http_brotli_step_e  step;
     size_t                  pending;
     ngx_uint_t              complete;
     ngx_uint_t              urgent;
     ngx_uint_t              compress;
     ngx_chain_t            *link;
+
+    /* Never read unless REJECT is reported, but left defined either way. */
+    *rc = NGX_OK;
+
+    /* The steady state: the headers are away and the encoder exists, so there
+       is nothing to settle and the input chain need not be walked at all. */
+    if (!ctx->headers_postponed && ctx->initialized) {
+        return NGX_HTTP_BROTLI_ACCEPT;
+    }
+
+    r = ctx->request;
+
+    /* Both decisions below ask the chain the same three questions, and neither
+       touches it, so they share one walk. */
+    pending = ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
+
+    /* Headers held back because the length was unknown. Decide as soon as the
+       body answers the only question brotli_min_length asks - is it at least
+       that big - which needs min_length bytes, not the whole response, so this
+       costs no meaningful latency. A flush marker means something downstream
+       is waiting, so decide immediately and compress, since the total is still
+       unknown. */
+    if (ctx->headers_postponed) {
+        conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
+
+        if (complete) {
+            /* Whole response in hand, so the comparison is exact. */
+            compress = (pending >= (size_t) conf->min_length);
+        } else if (urgent || pending >= (size_t) conf->min_length) {
+            compress = 1;
+        } else {
+            /* Too little to judge, and nothing waiting on it. */
+            return NGX_HTTP_BROTLI_REJECT;
+        }
+
+        header_rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
+        if (header_rc == NGX_ERROR) {
+            ngx_http_brotli_filter_close(ctx);
+            *rc = NGX_ERROR;
+            return NGX_HTTP_BROTLI_REJECT;
+        }
+        /* A special response was substituted below us; the body we hold is no
+           longer the one being sent. Must be checked before handing anything
+           on. */
+        if (header_rc > NGX_OK) {
+            *rc = header_rc;
+            return NGX_HTTP_BROTLI_REJECT;
+        }
+
+        if (!compress) {
+            /* Pass the held input through untouched; ctx->closed makes every
+               later call a straight hand-off. */
+            link = ctx->in;
+            ctx->in = NULL;
+            r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+            *rc = ngx_http_next_body_filter(r, link);
+            return NGX_HTTP_BROTLI_REJECT;
+        }
+    }
+
+    /* Choosing the encoder window costs memory that scales with the window, so
+       when the response size is unknown it is worth waiting a moment to see if
+       the whole thing turns up. Brotli emits nothing for non-flush input below
+       its block size anyway, so holding it here costs no latency. */
+    if (!ctx->initialized) {
+        if (complete) {
+            /* Whole response in hand: size the window from it exactly. */
+            if (ctx->content_length < 0) {
+                ctx->content_length = (off_t) pending;
+            }
+        } else if (!ctx->caller_wants_output && !urgent &&
+                   ctx->content_length < 0 &&
+                   pending < NGX_HTTP_BROTLI_DEFER_INPUT) {
+            /* Still might be a small response. Wait for the rest rather than
+               commit to the configured window. Either the caller asking for
+               output, or "urgent" meaning a filter downstream is waiting on
+               these bytes, stops the holding and starts the encoding. */
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                "brotli deferring encoder: pending:%uz", pending);
+            return NGX_HTTP_BROTLI_REJECT;
+        }
+    }
+
+    return NGX_HTTP_BROTLI_ACCEPT;
+}
+
+/* Response body filtration (compression). */
+static ngx_int_t
+ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    ngx_int_t              rc;
+    ngx_http_brotli_ctx_t *ctx;
+    ngx_http_brotli_step_e step;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
 
@@ -596,6 +724,11 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         return ngx_http_next_body_filter(r, in);
     }
 
+    /* Recorded before "in" is folded into ctx->in, which is what makes the two
+       distinguishable further down: ctx->in running dry says the filter has
+       nothing left to compress, this says the caller brought nothing new. */
+    ctx->caller_wants_output = (in == NULL);
+
     /* If more input is provided - append it to our input chain. */
     if (in) {
         if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
@@ -605,82 +738,8 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     }
 
-    /* The two decisions below - whether to compress at all, and whether to
-       hold input back before sizing the window - ask the input chain the same
-       three questions, and neither touches it, so they share one walk. They
-       are nested under it rather than merely following it, so the dependency
-       is structural and the answers cannot be read where they were never
-       computed. Neither runs once the headers are away and the encoder exists,
-       which is the steady state, so this stays off the hot path. */
-    if (ctx->headers_postponed || !ctx->initialized) {
-        pending =
-            ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
-
-        /* Headers held back because the length was unknown. Decide as soon as
-           the body answers the only question brotli_min_length asks - is it at
-           least that big - which needs min_length bytes, not the whole
-           response, so this costs no meaningful latency. A flush marker means
-           something downstream is waiting, so decide immediately and compress,
-           since the total is still unknown. */
-        if (ctx->headers_postponed) {
-            conf =
-                ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
-
-            if (complete) {
-                /* Whole response in hand, so the comparison is exact. */
-                compress = (pending >= (size_t) conf->min_length);
-            } else if (urgent || pending >= (size_t) conf->min_length) {
-                compress = 1;
-            } else {
-                /* Too little to judge, and nothing waiting on it. */
-                return NGX_OK;
-            }
-
-            rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
-            if (rc == NGX_ERROR) {
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-            }
-            /* A special response was substituted below us; the body we hold is
-               no longer the one being sent. Must be checked before handing
-               anything on. */
-            if (rc > NGX_OK) {
-                return rc;
-            }
-
-            if (!compress) {
-                /* Pass the held input through untouched; ctx->closed makes
-                   every later call a straight hand-off. */
-                link = ctx->in;
-                ctx->in = NULL;
-                r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-                return ngx_http_next_body_filter(r, link);
-            }
-        }
-
-        /* Choosing the encoder window costs memory that scales with the
-           window, so when the response size is unknown it is worth waiting a
-           moment to see if the whole thing turns up. Brotli emits nothing for
-           non-flush input below its block size anyway, so holding it here
-           costs no latency. */
-        if (!ctx->initialized) {
-            if (complete) {
-                /* Whole response in hand: size the window from it exactly. */
-                if (ctx->content_length < 0) {
-                    ctx->content_length = (off_t) pending;
-                }
-            } else if (in != NULL && !urgent && ctx->content_length < 0 &&
-                       pending < NGX_HTTP_BROTLI_DEFER_INPUT) {
-                /* Still might be a small response. Wait for the rest rather
-                   than commit to the configured window. A NULL "in" means the
-                   caller wants progress, and "urgent" means a filter
-                   downstream is waiting on these bytes; in both cases stop
-                   holding and start encoding. */
-                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                    "brotli deferring encoder: pending:%uz", pending);
-                return NGX_OK;
-            }
-        }
+    if (ngx_http_brotli_filter_prepare(ctx, &rc) != NGX_HTTP_BROTLI_ACCEPT) {
+        return rc;
     }
 
     if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) != NGX_OK) {
@@ -703,7 +762,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
             step = ngx_http_brotli_filter_take_output(ctx);
         } else {
-            step = ngx_http_brotli_filter_feed_encoder(ctx, in);
+            step = ngx_http_brotli_filter_feed_encoder(ctx);
         }
 
         switch (step) {
@@ -853,10 +912,8 @@ ngx_http_brotli_filter_alloc(void *opaque, size_t size)
 
     p = ngx_alloc(size, pool->log);
 
-#if (NGX_DEBUG)
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pool->log, 0,
         "brotli alloc: %p, size:%uz", p, size);
-#endif
 
     return p;
 }
@@ -943,7 +1000,20 @@ ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
 
-    ngx_conf_merge_value(conf->quality, prev->quality, 6);
+    /* 4 rather than the 6 this module used to default to. Measured against
+       script/corpus with a release build: the corpus compresses to 228,062
+       bytes at quality 4 against 212,327 at 6 - 7.4% larger - for 10.0 ms of
+       encoder time against 18.6, a little over half. Unlike the lg_win change
+       below this buys nothing in memory: peak live encoder bytes are flat
+       across the range, 1.94 MB at 4 against 1.93 MB at 6. It trades ratio
+       for CPU, and only that.
+
+       Worth knowing before moving it again: 4 is not the knee of the curve.
+       Quality 5 costs 0.8% in ratio against 6 and saves 20% of the time,
+       where the further step down to 4 costs another 6.6% in ratio to save
+       another 33%. Most of the CPU is available at 5 for almost none of the
+       bytes; going to 4 is a deliberate choice to spend bytes on latency. */
+    ngx_conf_merge_value(conf->quality, prev->quality, 4);
     /* 16 bits (64k) rather than the 19 (512k) this module used to default to.
        Brotli picks a much cheaper hasher at lg_win <= 16, so 64k is the largest
        window before encoder memory jumps: measured against script/corpus, a
@@ -951,9 +1021,12 @@ ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent, void *child)
        that costs in ratio depends on the content, since it only bites where a
        match would have reached back beyond 64 KB - +0.04% on CSS, +0.4% on JS,
        +1.0% on minified JS, +2.2% on prose, +2.7% on HTML, +1.6% over the
-       corpus as a whole. 32k and 16k cost the same memory as 64k while
-       compressing worse, so 64k is the useful floor rather than the smallest
-       possible value. */
+       corpus as a whole. Those are at quality 6, which was the default when
+       they were taken; at the current default of 4 the same change costs
+       +1.1% over the corpus and +2.4% at its worst, a lower quality having
+       fewer long-range matches to give up. 32k and 16k cost the same memory
+       as 64k while compressing worse, so 64k is the useful floor rather than
+       the smallest possible value. */
     ngx_conf_merge_size_value(conf->lg_win, prev->lg_win, 16);
     /* 20 is the gzip module's default, but Brotli is a far worse deal on tiny
        responses: an encoder instance costs ~560 KB regardless of how little it
@@ -1003,6 +1076,5 @@ ngx_http_brotli_parse_wbits(ngx_conf_t *cf, void *post, void *data)
     }
 
     return "must be 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k, 256k, 512k, 1m, 2m, "
-           "4m, "
-           "8m or 16m";
+           "4m, 8m or 16m";
 }
