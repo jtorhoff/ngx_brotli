@@ -2,12 +2,14 @@
  * Copyright (C) Google Inc.
  */
 
-/* Accept-Encoding parsing, shared by the filter and the static module.
+/* HTTP header handling shared by the filter and the static module: reading
+ * Accept-Encoding to decide whether a client will take Brotli, and labelling
+ * a response that carries it.
  *
- * Both modules have to answer the same question - will this client take
- * Brotli - and previously each carried its own copy of the answer. The copies
- * drifted: the static module's had lost the length guard, and a fix to one
- * did not reach the other.
+ * Both modules have to answer the same questions, and previously each carried
+ * its own copy of the answers. The copies drifted: the static module's
+ * Accept-Encoding parser had lost the length guard, and a fix to one did not
+ * reach the other.
  *
  * The functions are static and live in the header rather than in a source
  * file of their own, so that neither module's "config" has to grow a second
@@ -16,8 +18,8 @@
  * copy - with no duplicate symbols and no build changes.
  */
 
-#ifndef NGX_HTTP_BROTLI_ACCEPT_ENCODING_H_INCLUDED_
-#define NGX_HTTP_BROTLI_ACCEPT_ENCODING_H_INCLUDED_
+#ifndef NGX_HTTP_BROTLI_HEADERS_H_INCLUDED_
+#define NGX_HTTP_BROTLI_HEADERS_H_INCLUDED_
 
 #include <ngx_config.h>
 #include <ngx_core.h>
@@ -206,4 +208,34 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
-#endif /* NGX_HTTP_BROTLI_ACCEPT_ENCODING_H_INCLUDED_ */
+/* Labels the response as Brotli-encoded. Both modules set exactly this pair of
+   headers and previously each built the list entry itself, so the version
+   guard below had to be kept in step by hand in two places.
+
+   Returns NGX_ERROR only if the header list could not be grown. The callers
+   report that differently - the filter as NGX_ERROR, the static handler as a
+   500 - so the mapping is left to them. */
+static ngx_int_t
+ngx_http_brotli_set_content_encoding(ngx_http_request_t *r)
+{
+    ngx_table_elt_t *content_encoding_entry;
+
+    content_encoding_entry = ngx_list_push(&r->headers_out.headers);
+    if (content_encoding_entry == NULL) {
+        return NGX_ERROR;
+    }
+
+    content_encoding_entry->hash = 1;
+#if nginx_version >= 1023000
+    /* Since 1.23.0 the headers_out entries are linked, so a pushed entry has
+       to terminate its own list. */
+    content_encoding_entry->next = NULL;
+#endif
+    ngx_str_set(&content_encoding_entry->key, "Content-Encoding");
+    ngx_str_set(&content_encoding_entry->value, "br");
+    r->headers_out.content_encoding = content_encoding_entry;
+
+    return NGX_OK;
+}
+
+#endif /* NGX_HTTP_BROTLI_HEADERS_H_INCLUDED_ */

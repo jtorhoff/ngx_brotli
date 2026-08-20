@@ -9,7 +9,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../common/ngx_http_brotli_accept_encoding.h"
+#include "../common/ngx_http_brotli_headers.h"
 
 /* >> Configuration */
 
@@ -93,7 +93,6 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     ngx_log_t                     *log;
     ngx_http_core_loc_conf_t      *location_cfg;
     ngx_open_file_info_t           file_info;
-    ngx_table_elt_t               *content_encoding_entry;
     ngx_buf_t                     *buf;
     ngx_chain_t                    out;
 
@@ -225,17 +224,9 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     }
 
     /* Set "Content-Encoding" header. */
-    content_encoding_entry = ngx_list_push(&r->headers_out.headers);
-    if (content_encoding_entry == NULL) {
+    if (ngx_http_brotli_set_content_encoding(r) != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-    content_encoding_entry->hash = 1;
-#if nginx_version >= 1023000
-    content_encoding_entry->next = NULL;
-#endif
-    ngx_str_set(&content_encoding_entry->key, "Content-Encoding");
-    ngx_str_set(&content_encoding_entry->value, "br");
-    r->headers_out.content_encoding = content_encoding_entry;
 
     /* Setup response body. */
     buf = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));

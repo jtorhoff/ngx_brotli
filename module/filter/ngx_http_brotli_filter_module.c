@@ -8,7 +8,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../common/ngx_http_brotli_accept_encoding.h"
+#include "../common/ngx_http_brotli_headers.h"
 
 #if (NGX_HAVE_BROTLI_ENC_ENCODE_H)
 #include <brotli/enc/encode.h>
@@ -315,8 +315,6 @@ static ngx_int_t
 ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     ngx_http_brotli_ctx_t *ctx, ngx_uint_t compress)
 {
-    ngx_table_elt_t *h;
-
     ctx->headers_postponed = 0;
 
     if (!compress) {
@@ -327,18 +325,9 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     }
 
     /* Tell the filters below that the body is compressed. */
-    h = ngx_list_push(&r->headers_out.headers);
-    if (h == NULL) {
+    if (ngx_http_brotli_set_content_encoding(r) != NGX_OK) {
         return NGX_ERROR;
     }
-
-    h->hash = 1;
-#if nginx_version >= 1023000
-    h->next = NULL;
-#endif
-    ngx_str_set(&h->key, "Content-Encoding");
-    ngx_str_set(&h->value, "br");
-    r->headers_out.content_encoding = h;
 
     ngx_http_clear_content_length(r);
     ngx_http_clear_accept_ranges(r);
