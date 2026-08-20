@@ -581,19 +581,115 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
-/* Response body filtration (compression). */
+/* Everything that has to be settled before the encoder can run: committing
+   headers the header filter held back, and deciding whether to go on holding
+   input while the response size is still unknown. Both questions only arise
+   before the steady state, and both are answered from one walk of the input
+   chain.
+
+   Returns NGX_DECLINED when there is nothing left to settle and the caller
+   should carry on into the encoder loop. Anything else is the body filter's
+   own return value, already final - including the pass-through case, where
+   this has handed the held input to the next filter itself. NGX_DECLINED is
+   safe as the sentinel because no body filter returns it. */
 static ngx_int_t
-ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx)
 {
     ngx_int_t               rc;
-    ngx_http_brotli_ctx_t  *ctx;
+    ngx_http_request_t     *r;
     ngx_http_brotli_conf_t *conf;
-    ngx_http_brotli_step_e  step;
     size_t                  pending;
     ngx_uint_t              complete;
     ngx_uint_t              urgent;
     ngx_uint_t              compress;
     ngx_chain_t            *link;
+
+    /* The steady state: the headers are away and the encoder exists, so there
+       is nothing to settle and the input chain need not be walked at all. */
+    if (!ctx->headers_postponed && ctx->initialized) {
+        return NGX_DECLINED;
+    }
+
+    r = ctx->request;
+
+    /* Both decisions below ask the chain the same three questions, and neither
+       touches it, so they share one walk. */
+    pending = ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
+
+    /* Headers held back because the length was unknown. Decide as soon as the
+       body answers the only question brotli_min_length asks - is it at least
+       that big - which needs min_length bytes, not the whole response, so this
+       costs no meaningful latency. A flush marker means something downstream
+       is waiting, so decide immediately and compress, since the total is still
+       unknown. */
+    if (ctx->headers_postponed) {
+        conf = ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
+
+        if (complete) {
+            /* Whole response in hand, so the comparison is exact. */
+            compress = (pending >= (size_t) conf->min_length);
+        } else if (urgent || pending >= (size_t) conf->min_length) {
+            compress = 1;
+        } else {
+            /* Too little to judge, and nothing waiting on it. */
+            return NGX_OK;
+        }
+
+        rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
+        if (rc == NGX_ERROR) {
+            ngx_http_brotli_filter_close(ctx);
+            return NGX_ERROR;
+        }
+        /* A special response was substituted below us; the body we hold is no
+           longer the one being sent. Must be checked before handing anything
+           on. */
+        if (rc > NGX_OK) {
+            return rc;
+        }
+
+        if (!compress) {
+            /* Pass the held input through untouched; ctx->closed makes every
+               later call a straight hand-off. */
+            link = ctx->in;
+            ctx->in = NULL;
+            r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
+            return ngx_http_next_body_filter(r, link);
+        }
+    }
+
+    /* Choosing the encoder window costs memory that scales with the window, so
+       when the response size is unknown it is worth waiting a moment to see if
+       the whole thing turns up. Brotli emits nothing for non-flush input below
+       its block size anyway, so holding it here costs no latency. */
+    if (!ctx->initialized) {
+        if (complete) {
+            /* Whole response in hand: size the window from it exactly. */
+            if (ctx->content_length < 0) {
+                ctx->content_length = (off_t) pending;
+            }
+        } else if (!ctx->caller_wants_output && !urgent &&
+                   ctx->content_length < 0 &&
+                   pending < NGX_HTTP_BROTLI_DEFER_INPUT) {
+            /* Still might be a small response. Wait for the rest rather than
+               commit to the configured window. Either the caller asking for
+               output, or "urgent" meaning a filter downstream is waiting on
+               these bytes, stops the holding and starts the encoding. */
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                "brotli deferring encoder: pending:%uz", pending);
+            return NGX_OK;
+        }
+    }
+
+    return NGX_DECLINED;
+}
+
+/* Response body filtration (compression). */
+static ngx_int_t
+ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    ngx_int_t              rc;
+    ngx_http_brotli_ctx_t *ctx;
+    ngx_http_brotli_step_e step;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
 
@@ -618,82 +714,9 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     }
 
-    /* The two decisions below - whether to compress at all, and whether to
-       hold input back before sizing the window - ask the input chain the same
-       three questions, and neither touches it, so they share one walk. They
-       are nested under it rather than merely following it, so the dependency
-       is structural and the answers cannot be read where they were never
-       computed. Neither runs once the headers are away and the encoder exists,
-       which is the steady state, so this stays off the hot path. */
-    if (ctx->headers_postponed || !ctx->initialized) {
-        pending =
-            ngx_http_brotli_filter_pending_input(ctx->in, &complete, &urgent);
-
-        /* Headers held back because the length was unknown. Decide as soon as
-           the body answers the only question brotli_min_length asks - is it at
-           least that big - which needs min_length bytes, not the whole
-           response, so this costs no meaningful latency. A flush marker means
-           something downstream is waiting, so decide immediately and compress,
-           since the total is still unknown. */
-        if (ctx->headers_postponed) {
-            conf =
-                ngx_http_get_module_loc_conf(r, ngx_http_brotli_filter_module);
-
-            if (complete) {
-                /* Whole response in hand, so the comparison is exact. */
-                compress = (pending >= (size_t) conf->min_length);
-            } else if (urgent || pending >= (size_t) conf->min_length) {
-                compress = 1;
-            } else {
-                /* Too little to judge, and nothing waiting on it. */
-                return NGX_OK;
-            }
-
-            rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
-            if (rc == NGX_ERROR) {
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-            }
-            /* A special response was substituted below us; the body we hold is
-               no longer the one being sent. Must be checked before handing
-               anything on. */
-            if (rc > NGX_OK) {
-                return rc;
-            }
-
-            if (!compress) {
-                /* Pass the held input through untouched; ctx->closed makes
-                   every later call a straight hand-off. */
-                link = ctx->in;
-                ctx->in = NULL;
-                r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-                return ngx_http_next_body_filter(r, link);
-            }
-        }
-
-        /* Choosing the encoder window costs memory that scales with the
-           window, so when the response size is unknown it is worth waiting a
-           moment to see if the whole thing turns up. Brotli emits nothing for
-           non-flush input below its block size anyway, so holding it here
-           costs no latency. */
-        if (!ctx->initialized) {
-            if (complete) {
-                /* Whole response in hand: size the window from it exactly. */
-                if (ctx->content_length < 0) {
-                    ctx->content_length = (off_t) pending;
-                }
-            } else if (in != NULL && !urgent && ctx->content_length < 0 &&
-                       pending < NGX_HTTP_BROTLI_DEFER_INPUT) {
-                /* Still might be a small response. Wait for the rest rather
-                   than commit to the configured window. A NULL "in" means the
-                   caller wants progress, and "urgent" means a filter
-                   downstream is waiting on these bytes; in both cases stop
-                   holding and start encoding. */
-                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                    "brotli deferring encoder: pending:%uz", pending);
-                return NGX_OK;
-            }
-        }
+    rc = ngx_http_brotli_filter_prepare(ctx);
+    if (rc != NGX_DECLINED) {
+        return rc;
     }
 
     if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) != NGX_OK) {
