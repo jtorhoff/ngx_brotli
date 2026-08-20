@@ -711,10 +711,9 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
 static ngx_int_t
 ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
-    ngx_int_t                 rc;
-    ngx_http_brotli_ctx_t    *ctx;
-    ngx_http_brotli_step_e    step;
-    ngx_http_brotli_prepare_e prepared;
+    ngx_int_t              rc;
+    ngx_http_brotli_ctx_t *ctx;
+    ngx_http_brotli_step_e step;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
 
@@ -739,8 +738,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     }
 
-    prepared = ngx_http_brotli_filter_prepare(ctx, &rc);
-    if (prepared != NGX_HTTP_BROTLI_ACCEPT) {
+    if (ngx_http_brotli_filter_prepare(ctx, &rc) != NGX_HTTP_BROTLI_ACCEPT) {
         return rc;
     }
 
