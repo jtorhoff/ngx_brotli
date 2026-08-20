@@ -85,10 +85,13 @@ typedef enum {
    have had to be a value no filter below could ever hand back, and nothing
    but a comment would have kept that true. */
 typedef enum {
-    /* Nothing left to settle; carry on into the encoder loop. */
-    NGX_HTTP_BROTLI_PREPARE_ENCODE = 0,
-    /* This call is over; the body filter returns what prepare stored. */
-    NGX_HTTP_BROTLI_PREPARE_RETURN
+    /* The call is accepted for encoding: nothing left to settle, so carry on
+       into the encoder loop. */
+    NGX_HTTP_BROTLI_PREPARE_ACCEPT = 0,
+    /* The call is not encoded here - the response is being passed through, or
+       there is not yet enough of it to judge. Either way this call is over and
+       the body filter returns what prepare stored in "rc". */
+    NGX_HTTP_BROTLI_PREPARE_REJECT
 } ngx_http_brotli_prepare_e;
 
 /* Instance context. */
@@ -602,7 +605,7 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
    before the steady state, and both are answered from one walk of the input
    chain.
 
-   Returns NGX_HTTP_BROTLI_PREPARE_ENCODE when there is nothing left to settle
+   Returns NGX_HTTP_BROTLI_PREPARE_ACCEPT when there is nothing left to settle
    and the caller should carry on into the encoder loop. Otherwise the body
    filter is done for this call and "*rc" holds what it should return -
    including the pass-through case, where this has already handed the held
@@ -619,13 +622,13 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
     ngx_uint_t              compress;
     ngx_chain_t            *link;
 
-    /* Never read unless RETURN is reported, but left defined either way. */
+    /* Never read unless REJECT is reported, but left defined either way. */
     *rc = NGX_OK;
 
     /* The steady state: the headers are away and the encoder exists, so there
        is nothing to settle and the input chain need not be walked at all. */
     if (!ctx->headers_postponed && ctx->initialized) {
-        return NGX_HTTP_BROTLI_PREPARE_ENCODE;
+        return NGX_HTTP_BROTLI_PREPARE_ACCEPT;
     }
 
     r = ctx->request;
@@ -650,21 +653,21 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
             compress = 1;
         } else {
             /* Too little to judge, and nothing waiting on it. */
-            return NGX_HTTP_BROTLI_PREPARE_RETURN;
+            return NGX_HTTP_BROTLI_PREPARE_REJECT;
         }
 
         header_rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
         if (header_rc == NGX_ERROR) {
             ngx_http_brotli_filter_close(ctx);
             *rc = NGX_ERROR;
-            return NGX_HTTP_BROTLI_PREPARE_RETURN;
+            return NGX_HTTP_BROTLI_PREPARE_REJECT;
         }
         /* A special response was substituted below us; the body we hold is no
            longer the one being sent. Must be checked before handing anything
            on. */
         if (header_rc > NGX_OK) {
             *rc = header_rc;
-            return NGX_HTTP_BROTLI_PREPARE_RETURN;
+            return NGX_HTTP_BROTLI_PREPARE_REJECT;
         }
 
         if (!compress) {
@@ -674,7 +677,7 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
             ctx->in = NULL;
             r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
             *rc = ngx_http_next_body_filter(r, link);
-            return NGX_HTTP_BROTLI_PREPARE_RETURN;
+            return NGX_HTTP_BROTLI_PREPARE_REJECT;
         }
     }
 
@@ -697,11 +700,11 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
                these bytes, stops the holding and starts the encoding. */
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                 "brotli deferring encoder: pending:%uz", pending);
-            return NGX_HTTP_BROTLI_PREPARE_RETURN;
+            return NGX_HTTP_BROTLI_PREPARE_REJECT;
         }
     }
 
-    return NGX_HTTP_BROTLI_PREPARE_ENCODE;
+    return NGX_HTTP_BROTLI_PREPARE_ACCEPT;
 }
 
 /* Response body filtration (compression). */
@@ -737,7 +740,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     }
 
     prepared = ngx_http_brotli_filter_prepare(ctx, &rc);
-    if (prepared != NGX_HTTP_BROTLI_PREPARE_ENCODE) {
+    if (prepared != NGX_HTTP_BROTLI_PREPARE_ACCEPT) {
         return rc;
     }
 
