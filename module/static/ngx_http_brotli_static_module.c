@@ -79,8 +79,6 @@ ngx_module_t ngx_http_brotli_static_module = {NGX_MODULE_V1,
 
 /* << Module definition*/
 
-static const u_char ngx_http_brotli_static_content_encoding[] =
-    "Content-Encoding";
 static /* const */ u_char ngx_http_brotli_static_suffix[] = ".br";
 static const size_t       ngx_http_brotli_static_suffix_len = 3;
 
@@ -235,9 +233,8 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
 #if nginx_version >= 1023000
     content_encoding_entry->next = NULL;
 #endif
-    ngx_str_set(&content_encoding_entry->key,
-        ngx_http_brotli_static_content_encoding);
-    ngx_str_set(&content_encoding_entry->value, ngx_http_brotli_encoding);
+    ngx_str_set(&content_encoding_entry->key, "Content-Encoding");
+    ngx_str_set(&content_encoding_entry->value, "br");
     r->headers_out.content_encoding = content_encoding_entry;
 
     /* Setup response body. */
