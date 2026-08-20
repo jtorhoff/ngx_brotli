@@ -1042,6 +1042,5 @@ ngx_http_brotli_parse_wbits(ngx_conf_t *cf, void *post, void *data)
     }
 
     return "must be 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k, 256k, 512k, 1m, 2m, "
-           "4m, "
-           "8m or 16m";
+           "4m, 8m or 16m";
 }
