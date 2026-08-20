@@ -343,32 +343,31 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
 
 /* Hands the committed output buffer to the next filter, and reports whether
    the encoder may be touched again. The encoder must not be, while any of its
-   output is still outstanding: out_buf points into memory Brotli owns. */
+   output is still outstanding: out_buf points into memory Brotli owns.
+
+   The loop calls this only while ctx->output is not IDLE, so the buffer is
+   always in one of two states on entry, and "resend" says which. */
 static ngx_http_brotli_step_e
 ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
 {
     ngx_int_t           rc;
-    ptrdiff_t           available_busy_output;
+    ngx_uint_t          resend;
+    off_t               outstanding;
     ngx_chain_t        *to_send;
     ngx_http_request_t *r;
 
     r = ctx->request;
 
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY) {
-        available_busy_output = ngx_buf_size(ctx->out_buf);
-    } else {
-        available_busy_output = 0;
-    }
-
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
-        to_send = ctx->out_chain;
-    } else {
-        to_send = NULL;
-    }
+    /* READY: freshly filled, so hand the chain over. BUSY: handed over once
+       already and not yet fully consumed, so offer nothing new and see
+       whether the filters below have moved any of it. */
+    resend = (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY);
+    to_send = resend ? NULL : ctx->out_chain;
+    outstanding = ngx_buf_size(ctx->out_buf);
 
     rc = ngx_http_next_body_filter(r, to_send);
 
-    if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_READY) {
+    if (!resend) {
         ctx->output = NGX_HTTP_BROTLI_OUTPUT_BUSY;
     }
     if (ngx_buf_size(ctx->out_buf) == 0) {
@@ -376,8 +375,12 @@ ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
     }
 
     if (rc == NGX_OK) {
-        if (ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
-            available_busy_output == ngx_buf_size(ctx->out_buf)) {
+        /* A resend that moved nothing means the filters below are holding the
+           buffer and will not take more of it now, so going round again would
+           only ask a second time. A first send is never a stall, however
+           little of it was taken. */
+        if (resend && ctx->output == NGX_HTTP_BROTLI_OUTPUT_BUSY &&
+            ngx_buf_size(ctx->out_buf) == outstanding) {
             r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
             return NGX_HTTP_BROTLI_STEP_AGAIN;
         }
