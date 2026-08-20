@@ -1,4 +1,3 @@
-
 /*
  * Copyright (C) Igor Sysoev
  * Copyright (C) Nginx, Inc.
@@ -10,8 +9,6 @@
 #include <ngx_http.h>
 
 #include "../common/ngx_http_brotli_headers.h"
-
-/* >> Configuration */
 
 #define NGX_HTTP_BROTLI_STATIC_OFF 0
 #define NGX_HTTP_BROTLI_STATIC_ON 1
@@ -27,19 +24,11 @@ static ngx_conf_enum_t ngx_http_brotli_static[] = {
     {ngx_string("always"), NGX_HTTP_BROTLI_STATIC_ALWAYS},
     {ngx_null_string, 0}};
 
-/* << Configuration */
-
-/* >> Forward declarations */
-
 static ngx_int_t ngx_http_brotli_static_handler(ngx_http_request_t *r);
-static void *ngx_http_brotli_static_create_conf(ngx_conf_t *root_cfg);
-static char *ngx_http_brotli_static_merge_conf(ngx_conf_t *root_cfg,
+static void *ngx_http_brotli_static_create_conf(ngx_conf_t *conf_ctx);
+static char *ngx_http_brotli_static_merge_conf(ngx_conf_t *conf_ctx,
     void *parent, void *child);
-static ngx_int_t ngx_http_brotli_static_init(ngx_conf_t *root_cfg);
-
-/* << Forward declarations*/
-
-/* >> Module definition */
+static ngx_int_t ngx_http_brotli_static_init(ngx_conf_t *conf_ctx);
 
 static ngx_command_t ngx_http_brotli_static_commands[] = {
     {ngx_string("brotli_static"),
@@ -77,21 +66,19 @@ ngx_module_t ngx_http_brotli_static_module = {NGX_MODULE_V1,
     NULL,                               /* exit master */
     NGX_MODULE_V1_PADDING};
 
-/* << Module definition*/
-
 static /* const */ u_char ngx_http_brotli_static_suffix[] = ".br";
 static const size_t       ngx_http_brotli_static_suffix_len = 3;
 
 static ngx_int_t
 ngx_http_brotli_static_handler(ngx_http_request_t *r)
 {
-    ngx_http_brotli_static_conf_t *cfg;
+    ngx_http_brotli_static_conf_t *brotli_cfg;
     ngx_int_t                      rc;
     u_char                        *last;
     ngx_str_t                      path;
     size_t                         root;
     ngx_log_t                     *log;
-    ngx_http_core_loc_conf_t      *location_cfg;
+    ngx_http_core_loc_conf_t      *core_loc_cfg;
     ngx_open_file_info_t           file_info;
     ngx_buf_t                     *buf;
     ngx_chain_t                    out;
@@ -107,12 +94,12 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     }
 
     /* Get configuration and check if module is disabled. */
-    cfg = ngx_http_get_module_loc_conf(r, ngx_http_brotli_static_module);
-    if (cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) {
+    brotli_cfg = ngx_http_get_module_loc_conf(r, ngx_http_brotli_static_module);
+    if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) {
         return NGX_DECLINED;
     }
 
-    if (cfg->enable == NGX_HTTP_BROTLI_STATIC_ALWAYS) {
+    if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_ALWAYS) {
         /* Ignore request properties (e.g. Accept-Encoding). */
     } else {
         /* NGX_HTTP_BROTLI_STATIC_ON */
@@ -143,21 +130,21 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         path.data);
 
     /* Prepare to read the file. */
-    location_cfg = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    core_loc_cfg = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
     ngx_memzero(&file_info, sizeof(ngx_open_file_info_t));
-    file_info.read_ahead = location_cfg->read_ahead;
-    file_info.directio = location_cfg->directio;
-    file_info.valid = location_cfg->open_file_cache_valid;
-    file_info.min_uses = location_cfg->open_file_cache_min_uses;
-    file_info.errors = location_cfg->open_file_cache_errors;
-    file_info.events = location_cfg->open_file_cache_events;
-    rc = ngx_http_set_disable_symlinks(r, location_cfg, &path, &file_info);
+    file_info.read_ahead = core_loc_cfg->read_ahead;
+    file_info.directio = core_loc_cfg->directio;
+    file_info.valid = core_loc_cfg->open_file_cache_valid;
+    file_info.min_uses = core_loc_cfg->open_file_cache_min_uses;
+    file_info.errors = core_loc_cfg->open_file_cache_errors;
+    file_info.events = core_loc_cfg->open_file_cache_events;
+    rc = ngx_http_set_disable_symlinks(r, core_loc_cfg, &path, &file_info);
     if (rc != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
     /* Try to fetch file and process errors. */
-    rc = ngx_open_cached_file(location_cfg->open_file_cache, &path, &file_info,
+    rc = ngx_open_cached_file(core_loc_cfg->open_file_cache, &path, &file_info,
         r->pool);
     if (rc != NGX_OK) {
         ngx_uint_t level;
@@ -268,40 +255,50 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
 }
 
 static void *
-ngx_http_brotli_static_create_conf(ngx_conf_t *root_cfg)
+ngx_http_brotli_static_create_conf(ngx_conf_t *conf_ctx)
 {
-    ngx_http_brotli_static_conf_t *cfg;
-    cfg = ngx_palloc(root_cfg->pool, sizeof(ngx_http_brotli_static_conf_t));
-    if (cfg == NULL) {
+    ngx_http_brotli_static_conf_t *brotli_cfg;
+
+    brotli_cfg =
+        ngx_palloc(conf_ctx->pool, sizeof(ngx_http_brotli_static_conf_t));
+    if (brotli_cfg == NULL) {
         return NULL;
     }
-    cfg->enable = NGX_CONF_UNSET_UINT;
-    return cfg;
+
+    brotli_cfg->enable = NGX_CONF_UNSET_UINT;
+
+    return brotli_cfg;
 }
 
 static char *
-ngx_http_brotli_static_merge_conf(ngx_conf_t *root_cfg, void *parent,
+ngx_http_brotli_static_merge_conf(ngx_conf_t *conf_ctx, void *parent,
     void *child)
 {
-    ngx_http_brotli_static_conf_t *prev = parent;
-    ngx_http_brotli_static_conf_t *cfg = child;
-    ngx_conf_merge_uint_value(cfg->enable, prev->enable,
+    ngx_http_brotli_static_conf_t *prev_cfg = parent;
+    ngx_http_brotli_static_conf_t *brotli_cfg = child;
+
+    ngx_conf_merge_uint_value(brotli_cfg->enable, prev_cfg->enable,
         NGX_HTTP_BROTLI_STATIC_OFF);
+
     return NGX_CONF_OK;
 }
 
 static ngx_int_t
-ngx_http_brotli_static_init(ngx_conf_t *root_cfg)
+ngx_http_brotli_static_init(ngx_conf_t *conf_ctx)
 {
-    ngx_http_core_main_conf_t *core_cfg;
+    ngx_http_core_main_conf_t *core_main_cfg;
     ngx_http_handler_pt       *handler_slot;
-    core_cfg =
-        ngx_http_conf_get_module_main_conf(root_cfg, ngx_http_core_module);
+
+    core_main_cfg =
+        ngx_http_conf_get_module_main_conf(conf_ctx, ngx_http_core_module);
+
     handler_slot =
-        ngx_array_push(&core_cfg->phases[NGX_HTTP_CONTENT_PHASE].handlers);
+        ngx_array_push(&core_main_cfg->phases[NGX_HTTP_CONTENT_PHASE].handlers);
     if (handler_slot == NULL) {
         return NGX_ERROR;
     }
+
     *handler_slot = ngx_http_brotli_static_handler;
+
     return NGX_OK;
 }
