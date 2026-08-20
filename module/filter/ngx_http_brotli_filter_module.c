@@ -912,10 +912,8 @@ ngx_http_brotli_filter_alloc(void *opaque, size_t size)
 
     p = ngx_alloc(size, pool->log);
 
-#if (NGX_DEBUG)
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pool->log, 0,
         "brotli alloc: %p, size:%uz", p, size);
-#endif
 
     return p;
 }
