@@ -115,6 +115,10 @@ typedef struct {
        block fills, so it has to be flushed explicitly when the caller wants
        output. */
     unsigned unflushed_input : 1;
+    /* 1 if this call of the body filter arrived with no new data, i.e. nginx
+       is asking for progress on what it has already handed over rather than
+       adding to it. Set once per call, before the loop runs. */
+    unsigned caller_wants_output : 1;
 
     /* State of out_buf. ngx_pcalloc starts it at IDLE. */
     ngx_http_brotli_output_e output;
@@ -436,13 +440,45 @@ ngx_http_brotli_filter_take_output(ngx_http_brotli_ctx_t *ctx)
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
-/* Advances the encoder now that it holds no output: finishes the stream,
-   drains what a flush would release, or pushes the next input buffer in.
-   "in" is the chain this call of the body filter was given, which is NULL
-   when the caller only wants progress - not ctx->in, which is what is left to
-   compress. */
+/* Runs the encoder with no new input, which is how it is made to release what
+   it is already holding: FINISH once the input has ended, FLUSH before then.
+   Which one to use follows from ctx->end_of_input rather than from an
+   argument, because those are the only terms on which either is correct.
+   Both leave output for the next turn of the loop to collect, which is why
+   both mark the connection buffered. */
 static ngx_http_brotli_step_e
-ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
+ngx_http_brotli_filter_drain_encoder(ngx_http_brotli_ctx_t *ctx)
+{
+    size_t                 available_input;
+    size_t                 available_output;
+    BROTLI_BOOL            ok;
+    BrotliEncoderOperation operation;
+
+    if (ctx->end_of_input) {
+        operation = BROTLI_OPERATION_FINISH;
+    } else {
+        operation = BROTLI_OPERATION_FLUSH;
+    }
+
+    available_input = 0;
+    available_output = 0;
+
+    ok = BrotliEncoderCompressStream(ctx->encoder, operation, &available_input,
+        NULL, &available_output, NULL, NULL);
+
+    ctx->request->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+
+    if (!ok) {
+        return NGX_HTTP_BROTLI_STEP_FAILED;
+    }
+
+    return NGX_HTTP_BROTLI_STEP_CONTINUE;
+}
+
+/* Advances the encoder now that it holds no output: finishes the stream,
+   drains what a flush would release, or pushes the next input buffer in. */
+static ngx_http_brotli_step_e
+ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
 {
     ngx_http_request_t    *r;
     size_t                 input_size;
@@ -464,38 +500,21 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx, ngx_chain_t *in)
 
     if (ctx->end_of_input) {
         /* Ask the encoder to dump the leftover. */
-        available_input = 0;
-        available_output = 0;
-        ok = BrotliEncoderCompressStream(ctx->encoder, BROTLI_OPERATION_FINISH,
-            &available_input, NULL, &available_output, NULL, NULL);
-        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-        if (!ok) {
-            return NGX_HTTP_BROTLI_STEP_FAILED;
-        }
-        return NGX_HTTP_BROTLI_STEP_CONTINUE;
+        return ngx_http_brotli_filter_drain_encoder(ctx);
     }
 
     if (ctx->in == NULL) {
-        /* A NULL chain means the caller wants whatever we have. If the encoder
-           is holding input that PROCESS will not emit until a block fills, ask
-           for it now: without this a slowly-produced response stalls until
-           64 KB has accumulated. Costs a few percent of ratio, because each
-           flush closes a meta-block early. */
-        if (in == NULL && ctx->unflushed_input) {
-            available_input = 0;
-            available_output = 0;
-            ok = BrotliEncoderCompressStream(ctx->encoder,
-                BROTLI_OPERATION_FLUSH, &available_input, NULL,
-                &available_output, NULL, NULL);
+        /* Nothing left to compress. If the caller is asking for output and the
+           encoder is holding input that PROCESS will not emit until a block
+           fills, ask for it now: without this a slowly-produced response
+           stalls until 64 KB has accumulated. Costs a few percent of ratio,
+           because each flush closes a meta-block early. */
+        if (ctx->caller_wants_output && ctx->unflushed_input) {
             ctx->unflushed_input = 0;
             /* Mark the resulting buffer so the filters below push it out
                rather than holding it for more. */
             ctx->end_of_block = 1;
-            r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-            if (!ok) {
-                return NGX_HTTP_BROTLI_STEP_FAILED;
-            }
-            return NGX_HTTP_BROTLI_STEP_CONTINUE;
+            return ngx_http_brotli_filter_drain_encoder(ctx);
         }
         return NGX_HTTP_BROTLI_STEP_DONE;
     }
@@ -584,6 +603,11 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     if (ctx == NULL || ctx->closed || r->header_only) {
         return ngx_http_next_body_filter(r, in);
     }
+
+    /* Recorded before "in" is folded into ctx->in, which is what makes the two
+       distinguishable further down: ctx->in running dry says the filter has
+       nothing left to compress, this says the caller brought nothing new. */
+    ctx->caller_wants_output = (in == NULL);
 
     /* If more input is provided - append it to our input chain. */
     if (in) {
@@ -692,7 +716,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
             step = ngx_http_brotli_filter_take_output(ctx);
         } else {
-            step = ngx_http_brotli_filter_feed_encoder(ctx, in);
+            step = ngx_http_brotli_filter_feed_encoder(ctx);
         }
 
         switch (step) {
