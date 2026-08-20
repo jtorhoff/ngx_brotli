@@ -104,11 +104,14 @@ jobs:
         with:
           submodules: recursive
 
+      # libclang-rt-dev carries the sanitizer and libFuzzer runtimes. The clang
+      # package alone accepts -fsanitize=fuzzer and then fails at link with
+      # "cannot find .../libclang_rt.fuzzer-<arch>.a".
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang cmake libpcre3-dev zlib1g-dev
+            clang libclang-rt-dev cmake libpcre3-dev zlib1g-dev
 
       # The targets include nginx's headers and compile its ngx_string.c, so
       # they need a configured tree. Reusing build.sh keeps this job on the

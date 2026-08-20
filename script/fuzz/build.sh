@@ -75,6 +75,20 @@ INCS="-I $NGX_OBJS \
  -I $NGX/src/event/quic -I $NGX/src/os/unix -I $NGX/src/http \
  -I $NGX/src/http/modules -I $NGX/src/http/v2"
 
+# These come from nginx's own build rather than from the headers, so a target
+# compiled with its own flags has to repeat them. Without _GNU_SOURCE glibc
+# leaves struct in6_pktinfo incomplete, and ngx_event_udp.h holds one as a
+# field, so the include chain does not compile at all:
+#
+#   error: field has incomplete type 'struct in6_pktinfo'
+#
+# See auto/os/linux, which passes both. Darwin declares the struct
+# unconditionally and needs neither, which is why this only bites on CI.
+case "$(uname -s)" in
+Linux) PLATFORM_DEFS="-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64" ;;
+*) PLATFORM_DEFS="" ;;
+esac
+
 # PCRE and OpenSSL headers reach ngx_core.h on some builds; ask pkg-config and
 # shrug if it is not there.
 INCS="$INCS $(pkg-config --cflags libpcre2-8 openssl 2>/dev/null || true)"
@@ -92,7 +106,7 @@ for src in "$ROOT"/script/fuzz/fuzz_*.c; do
 	name="$(basename "$src" .c)"
 	echo "building $name with $CC"
 	# shellcheck disable=SC2086
-	"$CC" $SAN -g -O1 -fno-omit-frame-pointer $INCS \
+	"$CC" $SAN -g -O1 -fno-omit-frame-pointer $PLATFORM_DEFS $INCS \
 		-Wno-deprecated-declarations \
 		-o "$OUT/$name" "$src" "$STRING_C" $EXTRA_LDFLAGS
 done
