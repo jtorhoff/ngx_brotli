@@ -40,7 +40,7 @@ EXTRA_LDFLAGS=""
 # A real target, not an empty translation unit: libFuzzer supplies main() and
 # needs LLVMFuzzerTestOneInput, so linking nothing always fails and would make
 # the probe report "no libFuzzer" everywhere.
-probe="$(mktemp -t ngxbrotlifuzz).c"
+probe="$(mktemp -t ngxbrotlifuzz.XXX).c"
 cat >"$probe" <<'PROBE'
 #include <stddef.h>
 #include <stdint.h>
