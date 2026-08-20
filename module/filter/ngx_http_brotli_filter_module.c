@@ -1002,7 +1002,20 @@ ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
 
-    ngx_conf_merge_value(conf->quality, prev->quality, 6);
+    /* 4 rather than the 6 this module used to default to. Measured against
+       script/corpus with a release build: the corpus compresses to 228,062
+       bytes at quality 4 against 212,327 at 6 - 7.4% larger - for 10.0 ms of
+       encoder time against 18.6, a little over half. Unlike the lg_win change
+       below this buys nothing in memory: peak live encoder bytes are flat
+       across the range, 1.94 MB at 4 against 1.93 MB at 6. It trades ratio
+       for CPU, and only that.
+
+       Worth knowing before moving it again: 4 is not the knee of the curve.
+       Quality 5 costs 0.8% in ratio against 6 and saves 20% of the time,
+       where the further step down to 4 costs another 6.6% in ratio to save
+       another 33%. Most of the CPU is available at 5 for almost none of the
+       bytes; going to 4 is a deliberate choice to spend bytes on latency. */
+    ngx_conf_merge_value(conf->quality, prev->quality, 4);
     /* 16 bits (64k) rather than the 19 (512k) this module used to default to.
        Brotli picks a much cheaper hasher at lg_win <= 16, so 64k is the largest
        window before encoder memory jumps: measured against script/corpus, a
@@ -1010,9 +1023,12 @@ ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent, void *child)
        that costs in ratio depends on the content, since it only bites where a
        match would have reached back beyond 64 KB - +0.04% on CSS, +0.4% on JS,
        +1.0% on minified JS, +2.2% on prose, +2.7% on HTML, +1.6% over the
-       corpus as a whole. 32k and 16k cost the same memory as 64k while
-       compressing worse, so 64k is the useful floor rather than the smallest
-       possible value. */
+       corpus as a whole. Those are at quality 6, which was the default when
+       they were taken; at the current default of 4 the same change costs
+       +1.1% over the corpus and +2.4% at its worst, a lower quality having
+       fewer long-range matches to give up. 32k and 16k cost the same memory
+       as 64k while compressing worse, so 64k is the useful floor rather than
+       the smallest possible value. */
     ngx_conf_merge_size_value(conf->lg_win, prev->lg_win, 16);
     /* 20 is the gzip module's default, but Brotli is a far worse deal on tiny
        responses: an encoder instance costs ~560 KB regardless of how little it
