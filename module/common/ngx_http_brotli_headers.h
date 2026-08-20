@@ -25,10 +25,6 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-/* Not const: ngx_str_set assigns it to an ngx_str_t's data. */
-static /* const */ char ngx_http_brotli_encoding[] = "br";
-static const size_t     ngx_http_brotli_encoding_len = 2;
-
 /* Optional whitespace, as RFC 9110 defines it for list separators. */
 #define ngx_http_brotli_is_optional_whitespace(c) ((c) == ' ' || (c) == '\t')
 
@@ -125,8 +121,8 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
        accept. */
     for (pass = 0; pass < 2; pass++) {
         if (pass == 0) {
-            token = (u_char *) ngx_http_brotli_encoding;
-            token_len = ngx_http_brotli_encoding_len;
+            token = (u_char *) "br";
+            token_len = 2;
         } else {
             token = (u_char *) "*";
             token_len = 1;
