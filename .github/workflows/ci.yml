@@ -96,6 +96,62 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: python3 script/test_stream.py --nginx nginx/objs/nginx
 
+  fuzz:
+    name: Fuzz the Accept-Encoding parser
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake libpcre3-dev zlib1g-dev
+
+      # The targets include nginx's headers and compile its ngx_string.c, so
+      # they need a configured tree. Reusing build.sh keeps this job on the
+      # same nginx as the rest of the workflow, at the cost of also building
+      # Brotli, which the fuzzers do not link.
+      - name: Build Brotli and nginx
+        run: script/build.sh
+
+      - name: Build the fuzz targets
+        env:
+          CC: clang
+        run: script/fuzz/build.sh
+
+      # Deterministic, and the part that is a regression test: every seed is
+      # replayed once and a crash fails the job. -runs=0 replays without
+      # mutating, so it never writes to the tracked seed corpus.
+      - name: Replay the seed corpus
+        run: script/fuzz/out/fuzz_accept_encoding -runs=0 script/fuzz/corpus
+
+      # Exploratory, and time-boxed. New inputs go to a scratch directory
+      # given first, so a run cannot rewrite the seeds.
+      - name: Fuzz for two minutes
+        run: |
+          mkdir -p script/fuzz/out/corpus
+          script/fuzz/out/fuzz_accept_encoding \
+            -max_total_time=120 -print_final_stats=1 \
+            -dict=script/fuzz/accept_encoding.dict \
+            script/fuzz/out/corpus script/fuzz/corpus
+
+      # A finding is only useful if it can be reproduced, and libFuzzer writes
+      # the input beside the binary as crash-<sha1>.
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
+
   format:
     name: Check formatting with clang-format
     runs-on: ubuntu-26.04

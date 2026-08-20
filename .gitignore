@@ -8,3 +8,9 @@ deps/brotli/out/
 script/test/
 tmp/
 nginx/
+
+# Fuzzer binaries and the working corpus libFuzzer grows during a run. The
+# seed corpus in script/fuzz/corpus is curated and tracked; new inputs are
+# written to script/fuzz/out so a run never edits the seeds.
+script/fuzz/out/
+__pycache__/
