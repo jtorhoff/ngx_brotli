@@ -343,6 +343,44 @@ encoder's allocator tracing out of the debug log, so build nginx with
 Round-trip tests need a brotli decoder, either the python `brotli` module or
 the CLI that `script/build.sh` builds into `deps/brotli/out`.
 
+### Fuzzing
+
+`script/fuzz` holds a libFuzzer target for the `Accept-Encoding` parser, which
+is the only code here that reads bytes an attacker chooses. It walks a header
+value that nginx does not NUL-terminate, indexes backwards from a match and
+steps forwards past it, and the shared header records that the static module's
+copy of it had once lost its length guard.
+
+```bash
+script/build.sh          # the target needs nginx's headers and ngx_string.c
+CC=clang script/fuzz/build.sh
+
+# replay the tracked seeds once - deterministic, and what CI gates on
+script/fuzz/out/fuzz_accept_encoding -runs=0 script/fuzz/corpus
+
+# explore
+mkdir -p script/fuzz/out/corpus
+script/fuzz/out/fuzz_accept_encoding -max_total_time=60 \
+  -dict=script/fuzz/accept_encoding.dict \
+  script/fuzz/out/corpus script/fuzz/corpus
+```
+
+Pass the scratch directory *before* `script/fuzz/corpus`: libFuzzer writes new
+inputs into the first directory it is given, and the seed corpus is curated
+and tracked.
+
+The harness copies the header into a heap block sized to the input exactly, so
+a single byte read past either end is a fault AddressSanitizer stops on rather
+than a quiet read of whatever the pool happened to hold. It compiles nginx's
+`ngx_string.c` from source rather than linking the built object, because a
+sanitizer only sees loads it has instrumented and `ngx_strlcasestrn` is where a
+bad bound would bite.
+
+Apple's clang does not ship libFuzzer; on macOS `brew install llvm` and the
+build script will find it. Note that this covers the parser only — the filter
+module needs a request, a pool and a buffer chain to do anything, and
+`test_stream.py` is what exercises it.
+
 ### Corpus and benchmark
 
 `script/corpus` holds real-world files - a rendered Wikipedia article, a
