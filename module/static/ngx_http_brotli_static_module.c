@@ -66,9 +66,6 @@ ngx_module_t ngx_http_brotli_static_module = {NGX_MODULE_V1,
     NULL,                               /* exit master */
     NGX_MODULE_V1_PADDING};
 
-static /* const */ u_char ngx_http_brotli_static_suffix[] = ".br";
-static const size_t       ngx_http_brotli_static_suffix_len = 3;
-
 static ngx_int_t
 ngx_http_brotli_static_handler(ngx_http_request_t *r)
 {
@@ -77,6 +74,7 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     u_char                        *last;
     ngx_str_t                      path;
     size_t                         root;
+    ngx_uint_t                     level;
     ngx_log_t                     *log;
     ngx_http_core_loc_conf_t      *core_loc_cfg;
     ngx_open_file_info_t           file_info;
@@ -88,24 +86,21 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    /* Only files are supported. */
+    /* A URI ending in "/" names a directory, not a file to serve. */
     if (r->uri.data[r->uri.len - 1] == '/') {
         return NGX_DECLINED;
     }
 
-    /* Get configuration and check if module is disabled. */
     brotli_cfg = ngx_http_get_module_loc_conf(r, ngx_http_brotli_static_module);
     if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) {
         return NGX_DECLINED;
     }
 
-    if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_ALWAYS) {
-        /* Ignore request properties (e.g. Accept-Encoding). */
-    } else {
-        /* NGX_HTTP_BROTLI_STATIC_ON */
+    /* "always" serves the .br file whatever the request said about encodings,
+       so only "on" has to consult it. */
+    if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_ON) {
         r->gzip_vary = 1;
-        rc = ngx_http_brotli_claim_request(r);
-        if (rc != NGX_OK) {
+        if (ngx_http_brotli_claim_request(r) != NGX_OK) {
             return NGX_DECLINED;
         }
     }
@@ -113,17 +108,17 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     /* Get path and append the suffix. ngx_http_map_uri_to_path leaves path.len
        holding the size of the buffer it allocated - the path, the room asked
        for here, and a terminating zero - not the length of the string in it.
-       So the length has to be computed from the write pointer, as nginx's own
+       So the length has to come from the write pointer, as nginx's own
        gzip_static does; adding the suffix length to what it returned would
-       overshoot the string by four and the allocation itself by three. */
-    last = ngx_http_map_uri_to_path(r, &path, &root,
-        ngx_http_brotli_static_suffix_len);
+       overshoot the string by four and the allocation itself by three.
+       ngx_cpystrn returns the terminating zero it wrote, which is exactly
+       that pointer. */
+    last = ngx_http_map_uri_to_path(r, &path, &root, sizeof(".br") - 1);
     if (last == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-    ngx_cpystrn(last, ngx_http_brotli_static_suffix,
-        ngx_http_brotli_static_suffix_len + 1);
-    path.len = last + ngx_http_brotli_static_suffix_len - path.data;
+    last = ngx_cpystrn(last, (u_char *) ".br", sizeof(".br"));
+    path.len = last - path.data;
 
     log = r->connection->log;
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http filename: \"%s\"",
@@ -147,7 +142,6 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     rc = ngx_open_cached_file(core_loc_cfg->open_file_cache, &path, &file_info,
         r->pool);
     if (rc != NGX_OK) {
-        ngx_uint_t level;
         switch (file_info.err) {
             case 0:
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -174,11 +168,10 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    /* So far so good. */
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http static fd: %d",
         file_info.fd);
 
-    /* Only files are supported. */
+    /* The suffixed path resolved to something that is not a file to serve. */
     if (file_info.is_dir) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0, "http dir");
         return NGX_DECLINED;
@@ -191,7 +184,7 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     }
 #endif
 
-    /* Prepare request push the body. */
+    /* Discard the request body, then describe the response. */
     r->root_tested = !r->error_page;
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) {
@@ -226,16 +219,8 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     }
     buf->file_pos = 0;
     buf->file_last = file_info.size;
-    if (buf->file_last) {
-        buf->in_file = 1;
-    } else {
-        buf->in_file = 0;
-    }
-    if (r == r->main) {
-        buf->last_buf = 1;
-    } else {
-        buf->last_buf = 0;
-    }
+    buf->in_file = buf->file_last ? 1 : 0;
+    buf->last_buf = (r == r->main) ? 1 : 0;
     buf->last_in_chain = 1;
     buf->file->fd = file_info.fd;
     buf->file->name = path;
@@ -244,13 +229,11 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     out.buf = buf;
     out.next = NULL;
 
-    /* Push the response header. */
     rc = ngx_http_send_header(r);
     if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
         return rc;
     }
 
-    /* Push the response body. */
     return ngx_http_output_filter(r, &out);
 }
 
