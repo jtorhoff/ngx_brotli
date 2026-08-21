@@ -218,6 +218,34 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
+static ngx_int_t
+ngx_http_brotli_check_vary(u_char *key, size_t key_len, u_char *val,
+    size_t val_len)
+{
+    static const u_char vary[] = "Vary";
+    static const u_char encoding[] = "Accept-Encoding";
+    size_t              vary_len = sizeof(vary) - 1;
+    size_t              encoding_len = sizeof(encoding) - 1;
+
+    if (key_len != vary_len) {
+        return NGX_DECLINED;
+    }
+
+    if (val_len != encoding_len) {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_strncasecmp(key, (u_char *) vary, key_len) != 0) {
+        return NGX_DECLINED;
+    }
+
+    if (ngx_strncasecmp(val, (u_char *) encoding, val_len) != 0) {
+        return NGX_DECLINED;
+    }
+
+    return NGX_OK;
+}
+
 /* Advertises that the body depends on Accept-Encoding, so that a
    shared cache cannot hand a Brotli-encoded response to a client that
    never asked for one.
@@ -278,13 +306,9 @@ ngx_http_brotli_set_vary(ngx_http_request_t *r)
             continue;
         }
 
-        if (header[i].key.len == sizeof("Vary") - 1 &&
-            ngx_strncasecmp(header[i].key.data, (u_char *) "Vary",
-                sizeof("Vary") - 1) == 0 &&
-            header[i].value.len == sizeof("Accept-Encoding") - 1 &&
-            ngx_strncasecmp(header[i].value.data,
-                (u_char *) "Accept-Encoding",
-                sizeof("Accept-Encoding") - 1) == 0) {
+        if (ngx_http_brotli_check_vary(header[i].key.data,
+                header[i].key.len, header[i].value.data,
+                header[i].value.len) == NGX_OK) {
             return NGX_OK;
         }
     }
