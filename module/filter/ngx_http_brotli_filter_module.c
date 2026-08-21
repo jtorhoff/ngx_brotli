@@ -144,7 +144,7 @@ typedef struct {
     unsigned accepted_for_compression : 1;
 
     /* 1 if encoder is initialized, output chain and buffer are
-     * allocated. */
+       allocated. */
     unsigned initialized : 1;
     /* 1 if compression is finished / failed. */
     unsigned closed : 1;
@@ -276,7 +276,7 @@ static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt   ngx_http_next_body_filter;
 
 /* Process headers and decide if request is eligible for brotli
- * compression. */
+   compression. */
 static ngx_int_t
 ngx_http_brotli_header_filter(ngx_http_request_t *r)
 {
@@ -656,13 +656,13 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
     }
 
     /* Should never happen, just to make sure we don't enter infinite
-     * loop. */
+       loop. */
     if (consumed_input == 0) {
         return NGX_HTTP_BROTLI_STEP_FAILED;
     }
 
     /* Partially consumed: the rest of this buffer goes in next time
-     * round. */
+       round. */
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
@@ -787,7 +787,7 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx,
     if (!ctx->initialized) {
         if (complete) {
             /* Whole response in hand: size the window from it
-             * exactly. */
+               exactly. */
             if (ctx->content_length < 0) {
                 ctx->content_length = (off_t) pending;
             }
