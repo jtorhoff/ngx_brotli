@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Lays out the fixtures the shell suite serves. script/test_stream.py needs
-# none of this - it generates its own.
+# Lays out the fixtures the shell suite serves.
+# script/test_stream.py needs none of this - it generates its own.
 #
 set -eux
 
@@ -13,15 +13,17 @@ mkdir -p "$FILES/logs"
 echo "Kot lomom kolol slona!" >"$FILES/small.txt"
 echo "<html>Kot lomom kolol slona!</html>" >"$FILES/small.html"
 
-# A few megabytes of real prose, for the rate-limited transfer test. Project
-# Gutenberg is the original source, but it rate-limits and blocks automated
-# fetches often enough to make a build depend on luck, so fall back to the
-# vendored Brotli sources - real text, deterministic, already on disk.
+# A few megabytes of real prose, for the rate-limited transfer
+# test. Project Gutenberg is the original source, but it rate-limits
+# and blocks automated fetches often enough to make a build depend
+# on luck, so fall back to the vendored Brotli sources - real text,
+# deterministic, already on disk.
 if [ ! -s "$FILES/war-and-peace.txt" ]; then
-	if ! curl --compressed --fail --silent --show-error --location --retry 2 \
-		--max-time 60 -o "$FILES/war-and-peace.txt" \
+	if ! curl --compressed --fail --silent --show-error --location \
+		--retry 2 --max-time 60 -o "$FILES/war-and-peace.txt" \
 		https://www.gutenberg.org/files/2600/2600-0.txt; then
-		echo "corpus download failed; generating one from the Brotli sources" >&2
+		echo "corpus download failed; generating one from the" \
+			"Brotli sources" >&2
 		rm -f "$FILES/war-and-peace.txt"
 		find "$ROOT/deps/brotli/c" -name '*.c' -o -name '*.h' |
 			sort | xargs cat >>"$FILES/war-and-peace.txt"
@@ -34,4 +36,5 @@ if [ ! -s "$FILES/war-and-peace.txt" ]; then
 	fi
 fi
 
-wc -c "$FILES/war-and-peace.txt" "$FILES/small.txt" "$FILES/small.html"
+wc -c "$FILES/war-and-peace.txt" "$FILES/small.txt" \
+	"$FILES/small.html"

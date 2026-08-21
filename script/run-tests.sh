@@ -4,12 +4,14 @@
 # Run script/build.sh and script/prepare-tests.sh first.
 #
 # Overridable:
-#   NGINX_BIN  nginx binary to exercise (default: the one script/build.sh makes)
-#   BROTLI     brotli CLI used to decompress (default: the one it makes, else PATH)
+#   NGINX_BIN  nginx binary to exercise (default: the one
+#              script/build.sh makes)
+#   BROTLI     brotli CLI used to decompress (default: the one it
+#              makes, else PATH)
 #
-# Note NGINX_BIN rather than NGINX: nginx reserves the NGINX environment
-# variable for socket inheritance, and reads a binary path there as a list of
-# socket numbers.
+# Note NGINX_BIN rather than NGINX: nginx reserves the NGINX
+# environment variable for socket inheritance, and reads a binary
+# path there as a list of socket numbers.
 #
 # Exits with the number of failed tests.
 
@@ -18,7 +20,7 @@ NGINX="${NGINX_BIN:-$ROOT/nginx/objs/nginx}"
 BROTLI="${BROTLI:-$ROOT/deps/brotli/out/brotli}"
 SERVER=http://localhost:8080
 FILES=$ROOT/script/test
-HR="---------------------------------------------------------------------------"
+HR="-----------------------------------------------------------------"
 
 if [ ! -x "$NGINX" ]; then
 	echo "no nginx at $NGINX; run script/build.sh or set NGINX" >&2
@@ -42,8 +44,8 @@ add_result() {
 }
 
 get_failed() {
-	# "|| true": grep -c exits 1 when it counts nothing, i.e. when every test
-	# passed, which would abort the caller under set -e.
+	# "|| true": grep -c exits 1 when it counts nothing, i.e. when
+	# every test passed, which would abort the caller under set -e.
 	grep -v -c OK tmp/results.log || true
 }
 
@@ -73,7 +75,7 @@ expect_br_equal() {
 	fi
 }
 
-################################################################################
+######################################################################
 
 # Start default server.
 echo "Starting NGINX"
@@ -87,7 +89,8 @@ CURL="curl -s"
 echo $HR
 
 echo "Test: long file with rate limit"
-$CURL -H 'Accept-encoding: br' -o tmp/war-and-peace.br --limit-rate 300K $SERVER/war-and-peace.txt
+$CURL -H 'Accept-encoding: br' -o tmp/war-and-peace.br \
+	--limit-rate 300K $SERVER/war-and-peace.txt
 expect_br_equal "$FILES/war-and-peace.txt" tmp/war-and-peace
 
 echo "Test: compressed 404"
@@ -99,15 +102,18 @@ $CURL -H 'Accept-encoding: gzip, br' -o tmp/ae-01.br $SERVER/small.txt
 expect_br_equal "$FILES/small.txt" tmp/ae-01
 
 echo "Test: A-E: 'gzip, br, deflate'"
-$CURL -H 'Accept-encoding: gzip, br, deflate' -o tmp/ae-02.br $SERVER/small.txt
+$CURL -H 'Accept-encoding: gzip, br, deflate' -o tmp/ae-02.br \
+	$SERVER/small.txt
 expect_br_equal "$FILES/small.txt" tmp/ae-02
 
 echo "Test: A-E: 'gzip, br;q=1, deflate'"
-$CURL -H 'Accept-encoding: gzip, br;q=1, deflate' -o tmp/ae-03.br $SERVER/small.txt
+$CURL -H 'Accept-encoding: gzip, br;q=1, deflate' -o tmp/ae-03.br \
+	$SERVER/small.txt
 expect_br_equal "$FILES/small.txt" tmp/ae-03
 
 echo "Test: A-E: 'br;q=0.001'"
-$CURL -H 'Accept-encoding: br;q=0.001' -o tmp/ae-04.br $SERVER/small.txt
+$CURL -H 'Accept-encoding: br;q=0.001' -o tmp/ae-04.br \
+	$SERVER/small.txt
 expect_br_equal "$FILES/small.txt" tmp/ae-04
 
 echo "Test: A-E: 'bro'"
@@ -127,15 +133,18 @@ $CURL -H 'Accept-encoding: br;q=0.' -o tmp/ae-08.txt $SERVER/small.txt
 expect_equal "$FILES/small.txt" tmp/ae-08.txt
 
 echo "Test: A-E: 'br;q=0.0'"
-$CURL -H 'Accept-encoding: br;q=0.0' -o tmp/ae-09.txt $SERVER/small.txt
+$CURL -H 'Accept-encoding: br;q=0.0' -o tmp/ae-09.txt \
+	$SERVER/small.txt
 expect_equal "$FILES/small.txt" tmp/ae-09.txt
 
 echo "Test: A-E: 'br;q=0.00'"
-$CURL -H 'Accept-encoding: br;q=0.00' -o tmp/ae-10.txt $SERVER/small.txt
+$CURL -H 'Accept-encoding: br;q=0.00' -o tmp/ae-10.txt \
+	$SERVER/small.txt
 expect_equal "$FILES/small.txt" tmp/ae-10.txt
 
 echo "Test: A-E: 'br ; q = 0.000'"
-$CURL -H 'Accept-encoding: br ; q = 0.000' -o tmp/ae-11.txt $SERVER/small.txt
+$CURL -H 'Accept-encoding: br ; q = 0.000' -o tmp/ae-11.txt \
+	$SERVER/small.txt
 expect_equal "$FILES/small.txt" tmp/ae-11.txt
 
 echo "Test: A-E: 'bar'"
@@ -151,7 +160,7 @@ echo "Stopping default NGINX"
 # Stop server.
 $NGINX -p "$FILES" -c "$ROOT/script/test.conf" -s stop
 
-################################################################################
+######################################################################
 
 # Start default server.
 echo "Starting h2 NGINX"
@@ -163,11 +172,13 @@ CURL="curl --http2-prior-knowledge -s"
 echo $HR
 
 echo "Test: long file with rate limit"
-$CURL -H 'Accept-encoding: br' -o tmp/h2-war-and-peace.br --limit-rate 300K $SERVER/war-and-peace.txt
+$CURL -H 'Accept-encoding: br' -o tmp/h2-war-and-peace.br \
+	--limit-rate 300K $SERVER/war-and-peace.txt
 expect_br_equal "$FILES/war-and-peace.txt" tmp/h2-war-and-peace
 
 echo "Test: A-E: 'gzip, br'"
-$CURL -H 'Accept-encoding: gzip, br' -o tmp/h2-ae-01.br $SERVER/small.txt
+$CURL -H 'Accept-encoding: gzip, br' -o tmp/h2-ae-01.br \
+	$SERVER/small.txt
 expect_br_equal "$FILES/small.txt" tmp/h2-ae-01
 
 echo "Test: A-E: 'b'"
@@ -179,7 +190,7 @@ echo "Stopping h2 NGINX"
 # Stop server.
 $NGINX -p "$FILES" -c "$ROOT/script/test_h2.conf" -s stop
 
-################################################################################
+######################################################################
 
 # Report.
 

@@ -24,7 +24,8 @@ static ngx_conf_enum_t ngx_http_brotli_static[] = {
     {ngx_string("always"), NGX_HTTP_BROTLI_STATIC_ALWAYS},
     {ngx_null_string, 0}};
 
-static ngx_int_t ngx_http_brotli_static_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_brotli_static_handler(
+    ngx_http_request_t *r);
 static void *ngx_http_brotli_static_create_conf(ngx_conf_t *conf_ctx);
 static char *ngx_http_brotli_static_merge_conf(ngx_conf_t *conf_ctx,
     void *parent, void *child);
@@ -43,14 +44,14 @@ static ngx_http_module_t ngx_http_brotli_static_module_ctx = {
     NULL,                        /* preconfiguration */
     ngx_http_brotli_static_init, /* postconfiguration */
 
-    NULL, /* create main configuration */
-    NULL, /* init main configuration */
+    NULL, /* create main conf */
+    NULL, /* init main conf */
 
-    NULL, /* create server configuration */
-    NULL, /* merge server configuration */
+    NULL, /* create server conf */
+    NULL, /* merge server conf */
 
-    ngx_http_brotli_static_create_conf, /* create location configuration */
-    ngx_http_brotli_static_merge_conf   /* merge location configuration */
+    ngx_http_brotli_static_create_conf, /* create location conf */
+    ngx_http_brotli_static_merge_conf   /* merge location conf */
 };
 
 ngx_module_t ngx_http_brotli_static_module = {NGX_MODULE_V1,
@@ -91,18 +92,19 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    brotli_cfg = ngx_http_get_module_loc_conf(r, ngx_http_brotli_static_module);
+    brotli_cfg = ngx_http_get_module_loc_conf(r,
+        ngx_http_brotli_static_module);
     if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_OFF) {
         return NGX_DECLINED;
     }
 
-    /* "always" serves the .br file whatever the request said about encodings,
-       so only "on" has to consult it. */
+    /* "always" serves the .br file whatever the request said about
+       encodings, so only "on" has to consult it. */
     if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_ON) {
-        /* Set before the Accept-Encoding test, and left in place even when
-           this handler declines: what varies is the resource, not this one
-           request. "always" needs none of it, serving the same bytes to
-           everyone. */
+        /* Set before the Accept-Encoding test, and left in place even
+           when this handler declines: what varies is the resource,
+           not this one request. "always" needs none of it, serving
+           the same bytes to everyone. */
         if (ngx_http_brotli_set_vary(r) != NGX_OK) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
@@ -111,15 +113,16 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         }
     }
 
-    /* Get path and append the suffix. ngx_http_map_uri_to_path leaves path.len
-       holding the size of the buffer it allocated - the path, the room asked
-       for here, and a terminating zero - not the length of the string in it.
-       So the length has to come from the write pointer, as nginx's own
-       gzip_static does; adding the suffix length to what it returned would
-       overshoot the string by four and the allocation itself by three.
-       ngx_cpystrn returns the terminating zero it wrote, which is exactly
-       that pointer. */
-    last = ngx_http_map_uri_to_path(r, &path, &root, sizeof(".br") - 1);
+    /* Get path and append the suffix. ngx_http_map_uri_to_path leaves
+       path.len holding the size of the buffer it allocated - the
+       path, the room asked for here, and a terminating zero - not the
+       length of the string in it. So the length has to come from the
+       write pointer, as nginx's own gzip_static does; adding the
+       suffix length to what it returned would overshoot the string by
+       four and the allocation itself by three. ngx_cpystrn returns
+       the terminating zero it wrote, which is that pointer. */
+    last =
+        ngx_http_map_uri_to_path(r, &path, &root, sizeof(".br") - 1);
     if (last == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -127,11 +130,12 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     path.len = last - path.data;
 
     log = r->connection->log;
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http filename: \"%s\"",
-        path.data);
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+        "http filename: \"%s\"", path.data);
 
     /* Prepare to read the file. */
-    core_loc_cfg = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    core_loc_cfg =
+        ngx_http_get_module_loc_conf(r, ngx_http_core_module);
     ngx_memzero(&file_info, sizeof(ngx_open_file_info_t));
     file_info.read_ahead = core_loc_cfg->read_ahead;
     file_info.directio = core_loc_cfg->directio;
@@ -139,14 +143,15 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     file_info.min_uses = core_loc_cfg->open_file_cache_min_uses;
     file_info.errors = core_loc_cfg->open_file_cache_errors;
     file_info.events = core_loc_cfg->open_file_cache_events;
-    rc = ngx_http_set_disable_symlinks(r, core_loc_cfg, &path, &file_info);
+    rc = ngx_http_set_disable_symlinks(r, core_loc_cfg, &path,
+        &file_info);
     if (rc != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
     /* Try to fetch file and process errors. */
-    rc = ngx_open_cached_file(core_loc_cfg->open_file_cache, &path, &file_info,
-        r->pool);
+    rc = ngx_open_cached_file(core_loc_cfg->open_file_cache, &path,
+        &file_info, r->pool);
     if (rc != NGX_OK) {
         switch (file_info.err) {
             case 0:
@@ -177,15 +182,15 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0, "http static fd: %d",
         file_info.fd);
 
-    /* The suffixed path resolved to something that is not a file to serve. */
+    /* The suffixed path is not a file we can serve. */
     if (file_info.is_dir) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0, "http dir");
         return NGX_DECLINED;
     }
 #if !(NGX_WIN32)
     if (!file_info.is_file) {
-        ngx_log_error(NGX_LOG_CRIT, log, 0, "\"%s\" is not a regular file",
-            path.data);
+        ngx_log_error(NGX_LOG_CRIT, log, 0,
+            "\"%s\" is not a regular file", path.data);
         return NGX_HTTP_NOT_FOUND;
     }
 #endif
@@ -248,8 +253,8 @@ ngx_http_brotli_static_create_conf(ngx_conf_t *conf_ctx)
 {
     ngx_http_brotli_static_conf_t *brotli_cfg;
 
-    brotli_cfg =
-        ngx_palloc(conf_ctx->pool, sizeof(ngx_http_brotli_static_conf_t));
+    brotli_cfg = ngx_palloc(conf_ctx->pool,
+        sizeof(ngx_http_brotli_static_conf_t));
     if (brotli_cfg == NULL) {
         return NULL;
     }
@@ -278,11 +283,11 @@ ngx_http_brotli_static_init(ngx_conf_t *conf_ctx)
     ngx_http_core_main_conf_t *core_main_cfg;
     ngx_http_handler_pt       *handler_slot;
 
-    core_main_cfg =
-        ngx_http_conf_get_module_main_conf(conf_ctx, ngx_http_core_module);
+    core_main_cfg = ngx_http_conf_get_module_main_conf(conf_ctx,
+        ngx_http_core_module);
 
-    handler_slot =
-        ngx_array_push(&core_main_cfg->phases[NGX_HTTP_CONTENT_PHASE].handlers);
+    handler_slot = ngx_array_push(
+        &core_main_cfg->phases[NGX_HTTP_CONTENT_PHASE].handlers);
     if (handler_slot == NULL) {
         return NGX_ERROR;
     }

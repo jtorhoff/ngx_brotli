@@ -33,7 +33,8 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libpcre3-dev zlib1g-dev
+          sudo apt-get install -y --no-install-recommends \
+            cmake libpcre3-dev zlib1g-dev
 
       - name: Build Brotli and nginx
         run: script/build.sh
@@ -67,7 +68,8 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake libpcre3-dev zlib1g-dev
+          sudo apt-get install -y --no-install-recommends \
+            cmake libpcre3-dev zlib1g-dev
 
       - name: Build Brotli
         run: |
@@ -80,18 +82,20 @@ jobs:
           git clone --depth 1 --branch $NGINX_REF \
               https://github.com/nginx/nginx.git nginx
           cd nginx
+          CC_OPT="-fsanitize=address -fno-omit-frame-pointer -g -O1"
           ./auto/configure \
               --prefix="$GITHUB_WORKSPACE/script/test" \
               --with-http_v2_module \
               --with-debug \
-              --with-cc-opt="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+              --with-cc-opt="$CC_OPT" \
               --with-ld-opt="-fsanitize=address" \
               --add-module="$GITHUB_WORKSPACE"
           make -j "$(nproc)"
 
       - name: Streaming suite under AddressSanitizer
-        # Leaks are nginx's pools rather than anything this module owns, and
-        # the module's own balance is asserted by the suite itself.
+        # Leaks are nginx's pools rather than anything this module
+        # owns, and the module's own balance is asserted by the
+        # suite itself.
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: python3 script/test_stream.py --nginx nginx/objs/nginx
@@ -104,8 +108,9 @@ jobs:
         with:
           submodules: recursive
 
-      # libclang-rt-dev carries the sanitizer and libFuzzer runtimes. The clang
-      # package alone accepts -fsanitize=fuzzer and then fails at link with
+      # libclang-rt-dev carries the sanitizer and libFuzzer
+      # runtimes. The clang package alone accepts -fsanitize=fuzzer
+      # and then fails at link with
       # "cannot find .../libclang_rt.fuzzer-<arch>.a".
       - name: Install build dependencies
         run: |
@@ -113,10 +118,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang libclang-rt-dev cmake libpcre3-dev zlib1g-dev
 
-      # The targets include nginx's headers and compile its ngx_string.c, so
-      # they need a configured tree. Reusing build.sh keeps this job on the
-      # same nginx as the rest of the workflow, at the cost of also building
-      # Brotli, which the fuzzers do not link.
+      # The targets include nginx's headers and compile its
+      # ngx_string.c, so they need a configured tree. Reusing
+      # build.sh keeps this job on the same nginx as the rest of the
+      # workflow, at the cost of also building Brotli, which the
+      # fuzzers do not link.
       - name: Build Brotli and nginx
         run: script/build.sh
 
@@ -125,14 +131,17 @@ jobs:
           CC: clang
         run: script/fuzz/build.sh
 
-      # Deterministic, and the part that is a regression test: every seed is
-      # replayed once and a crash fails the job. -runs=0 replays without
-      # mutating, so it never writes to the tracked seed corpus.
+      # Deterministic, and the part that is a regression test: every
+      # seed is replayed once and a crash fails the job. -runs=0
+      # replays without mutating, so it never writes to the tracked
+      # seed corpus.
       - name: Replay the seed corpus
-        run: script/fuzz/out/fuzz_accept_encoding -runs=0 script/fuzz/corpus
+        run: |
+          script/fuzz/out/fuzz_accept_encoding -runs=0 \
+            script/fuzz/corpus
 
-      # Exploratory, and time-boxed. New inputs go to a scratch directory
-      # given first, so a run cannot rewrite the seeds.
+      # Exploratory, and time-boxed. New inputs go to a scratch
+      # directory given first, so a run cannot rewrite the seeds.
       - name: Fuzz for two minutes
         run: |
           mkdir -p script/fuzz/out/corpus
@@ -141,8 +150,9 @@ jobs:
             -dict=script/fuzz/accept_encoding.dict \
             script/fuzz/out/corpus script/fuzz/corpus
 
-      # A finding is only useful if it can be reproduced, and libFuzzer writes
-      # the input beside the binary as crash-<sha1>.
+      # A finding is only useful if it can be reproduced, and
+      # libFuzzer writes the input beside the binary as
+      # crash-<sha1>.
       - name: Upload crashing inputs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -158,7 +168,8 @@ jobs:
   format:
     name: Check formatting with clang-format
     # Newer than the other jobs on purpose: .clang-format sets
-    # AlignFunctionDeclarations, added in clang-format 19, and 24.04 ships 18.
+    # AlignFunctionDeclarations, added in clang-format 19, and
+    # 24.04 ships 18.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -170,8 +181,9 @@ jobs:
 
       - name: Check formatting
         run: |
-          # Printed so a failing run shows the version. The config needs 19 or
-          # newer; an unknown key is rejected outright rather than ignored.
+          # Printed so a failing run shows the version. The config
+          # needs 19 or newer; an unknown key is rejected outright
+          # rather than ignored.
           clang-format --version
           # deps/ is vendored and formats to its own conventions.
           clang-format --dry-run --Werror \

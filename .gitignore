@@ -1,16 +1,19 @@
-# Build output from the vendored Brotli; the submodule itself is tracked.
+# Build output from the vendored Brotli; the submodule itself is
+# tracked.
 deps/brotli/out/
 .vscode/
 
-# Artifacts left behind by the test scripts. script/test holds nginx's access
-# and error logs, which record client addresses, alongside the corpus; tmp
-# holds response bodies; nginx is the source tree script/build.sh clones.
+# Artifacts left behind by the test scripts. script/test holds
+# nginx's access and error logs, which record client addresses,
+# alongside the corpus; tmp holds response bodies; nginx is the
+# source tree script/build.sh clones.
 script/test/
 tmp/
 nginx/
 
-# Fuzzer binaries and the working corpus libFuzzer grows during a run. The
-# seed corpus in script/fuzz/corpus is curated and tracked; new inputs are
-# written to script/fuzz/out so a run never edits the seeds.
+# Fuzzer binaries and the working corpus libFuzzer grows during a
+# run. The seed corpus in script/fuzz/corpus is curated and tracked;
+# new inputs are written to script/fuzz/out so a run never edits the
+# seeds.
 script/fuzz/out/
 __pycache__/
