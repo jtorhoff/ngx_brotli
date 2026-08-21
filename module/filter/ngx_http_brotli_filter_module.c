@@ -124,8 +124,6 @@ typedef struct {
     /* Output buffer. */
     ngx_buf_t *out_buf;
 
-    /* Various state flags. */
-
     /* 1 if the response headers are still ours to send. Set when the response
        length is unknown, so that brotli_min_length can be applied once enough
        of the body has been seen to judge it. */
