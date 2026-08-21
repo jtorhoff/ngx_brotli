@@ -31,7 +31,7 @@
     ((c) == ' ' || (c) == '\t')
 
 static u_char *
-ngx_http_brotli_skip_optional_whitespace(u_char *cursor, u_char *end)
+ngx_http_brotli_skip_whitespace(u_char *cursor, u_char *end)
 {
     while (cursor < end &&
            ngx_http_brotli_is_optional_whitespace(*cursor)) {
@@ -50,20 +50,20 @@ ngx_http_brotli_is_zero_weighted(u_char *cursor, u_char *end)
 {
     ngx_uint_t digits;
 
-    cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
+    cursor = ngx_http_brotli_skip_whitespace(cursor, end);
     if (cursor == end || *cursor++ != ';') {
         return 0;
     }
-    cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
+    cursor = ngx_http_brotli_skip_whitespace(cursor, end);
     if (cursor == end || (*cursor != 'q' && *cursor != 'Q')) {
         return 0;
     }
     cursor++;
-    cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
+    cursor = ngx_http_brotli_skip_whitespace(cursor, end);
     if (cursor == end || *cursor++ != '=') {
         return 0;
     }
-    cursor = ngx_http_brotli_skip_optional_whitespace(cursor, end);
+    cursor = ngx_http_brotli_skip_whitespace(cursor, end);
     /* Any weight not starting with "0" is non-zero. */
     if (cursor == end || *cursor++ != '0') {
         return 0;
