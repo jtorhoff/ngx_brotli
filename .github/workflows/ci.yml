@@ -157,6 +157,8 @@ jobs:
 
   format:
     name: Check formatting with clang-format
+    # Newer than the other jobs on purpose: .clang-format sets
+    # AlignFunctionDeclarations, added in clang-format 19, and 24.04 ships 18.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
