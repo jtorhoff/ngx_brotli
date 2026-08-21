@@ -99,7 +99,13 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     /* "always" serves the .br file whatever the request said about encodings,
        so only "on" has to consult it. */
     if (brotli_cfg->enable == NGX_HTTP_BROTLI_STATIC_ON) {
-        r->gzip_vary = 1;
+        /* Set before the Accept-Encoding test, and left in place even when
+           this handler declines: what varies is the resource, not this one
+           request. "always" needs none of it, serving the same bytes to
+           everyone. */
+        if (ngx_http_brotli_set_vary(r) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
         if (ngx_http_brotli_claim_request(r) != NGX_OK) {
             return NGX_DECLINED;
         }

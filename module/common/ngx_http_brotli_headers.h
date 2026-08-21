@@ -204,6 +204,88 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
+/* Advertises that the body depends on Accept-Encoding, so that a shared cache
+   cannot hand a Brotli-encoded response to a client that never asked for one.
+
+   nginx has r->gzip_vary for this, but it is the gzip module's: the field only
+   exists under NGX_HTTP_GZIP, and the header filter emits nothing unless the
+   gzip_vary directive is also on. Whether a Brotli response is cacheable
+   should not turn on a gzip setting, so where that flag will not produce the
+   header this writes one itself.
+
+   Repeated Vary fields combine as one comma-separated list under RFC 9110, so
+   an upstream "Vary: Accept-Language" is left where it is and this is added
+   beside it. Only an entry already saying exactly this is redundant, and that
+   is the one case skipped.
+
+   Returns NGX_ERROR only if the header list could not be grown. */
+static ngx_int_t
+ngx_http_brotli_set_vary(ngx_http_request_t *r)
+{
+    ngx_uint_t       i;
+    ngx_list_part_t *part;
+    ngx_table_elt_t *header;
+    ngx_table_elt_t *vary;
+
+#if (NGX_HTTP_GZIP)
+    ngx_http_core_loc_conf_t *clcf;
+
+    /* Where nginx is already going to write the line, raise its flag instead
+       of writing a second one. It emits once however many modules ask, so on
+       a response Brotli declines and gzip then takes, this is what keeps the
+       two of us from producing "Vary: Accept-Encoding" twice. With the
+       directive off nginx writes nothing and clears the flag again, which is
+       the case the header below exists for. */
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    if (clcf->gzip_vary) {
+        r->gzip_vary = 1;
+        return NGX_OK;
+    }
+#endif
+
+    part = &r->headers_out.headers.part;
+    header = part->elts;
+
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            header = part->elts;
+            i = 0;
+        }
+
+        /* hash 0 marks an entry the filters below are to ignore. */
+        if (header[i].hash == 0) {
+            continue;
+        }
+
+        if (header[i].key.len == sizeof("Vary") - 1 &&
+            ngx_strncasecmp(header[i].key.data, (u_char *) "Vary",
+                sizeof("Vary") - 1) == 0 &&
+            header[i].value.len == sizeof("Accept-Encoding") - 1 &&
+            ngx_strncasecmp(header[i].value.data, (u_char *) "Accept-Encoding",
+                sizeof("Accept-Encoding") - 1) == 0) {
+            return NGX_OK;
+        }
+    }
+
+    vary = ngx_list_push(&r->headers_out.headers);
+    if (vary == NULL) {
+        return NGX_ERROR;
+    }
+
+    vary->hash = 1;
+#if nginx_version >= 1023000
+    vary->next = NULL;
+#endif
+    ngx_str_set(&vary->key, "Vary");
+    ngx_str_set(&vary->value, "Accept-Encoding");
+
+    return NGX_OK;
+}
+
 /* Labels the response as Brotli-encoded. Both modules set exactly this pair of
    headers and previously each built the list entry itself, so the version
    guard below had to be kept in step by hand in two places.

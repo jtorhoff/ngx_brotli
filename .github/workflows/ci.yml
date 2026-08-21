@@ -157,6 +157,8 @@ jobs:
 
   format:
     name: Check formatting with clang-format
+    # Newer than the other jobs on purpose: .clang-format sets
+    # AlignFunctionDeclarations, added in clang-format 19, and 24.04 ships 18.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
@@ -168,8 +170,8 @@ jobs:
 
       - name: Check formatting
         run: |
-          # .clang-format sets InsertBraces, which needs clang-format 15 or
-          # newer; an older one rejects the key outright rather than ignoring it.
+          # Printed so a failing run shows the version. The config needs 19 or
+          # newer; an unknown key is rejected outright rather than ignored.
           clang-format --version
           # deps/ is vendored and formats to its own conventions.
           clang-format --dry-run --Werror \

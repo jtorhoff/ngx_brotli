@@ -6,9 +6,10 @@
 # nginx's headers and link its ngx_string.o - script/build.sh does that.
 #
 # Overridable:
-#   CC        clang to build with. Must be a clang with libFuzzer; Apple's
-#             clang does not ship it, so on macOS point this at Homebrew LLVM
-#             (brew install llvm).
+#   CC        clang to build with. Must be a clang whose libFuzzer runtime is
+#             installed - Apple's does not ship one at all (brew install
+#             llvm), and on Debian and Ubuntu it is packaged separately from
+#             the compiler (libclang-rt-dev).
 #   NGX_OBJS  nginx build directory to take ngx_string.o and the generated
 #             headers from (default: nginx/objs)
 #
@@ -36,6 +37,7 @@ fi
 
 CC="${CC:-clang}"
 EXTRA_LDFLAGS=""
+UNAME="$(uname -s)"
 
 # A real target, not an empty translation unit: libFuzzer supplies main() and
 # needs LLVMFuzzerTestOneInput, so linking nothing always fails and would make
@@ -63,9 +65,29 @@ if ! "$CC" -fsanitize=fuzzer "$probe" -o "$probe.out" >/dev/null 2>&1; then
 		fi
 	done
 	if [ -z "$found" ]; then
-		echo "$CC cannot link a libFuzzer target." >&2
-		echo "Apple's clang does not ship libFuzzer: brew install llvm," >&2
-		echo "or set CC to a clang that has it." >&2
+		# Show what actually went wrong rather than guessing at it: the
+		# compiler accepts -fsanitize=fuzzer whether or not the runtime is
+		# installed, and only says so at link time. Capped because a libc++
+		# mismatch on macOS reports every unresolved symbol, mangled, and
+		# would bury the advice below under hundreds of lines.
+		echo "$CC cannot link a libFuzzer target:" >&2
+		probe_err="$("$CC" -fsanitize=fuzzer "$probe" -o "$probe.out" 2>&1 ||
+			true)"
+		echo "$probe_err" | head -6 | sed 's/^/  /' >&2
+		if [ "$(echo "$probe_err" | wc -l)" -gt 6 ]; then
+			echo "  ... (truncated)" >&2
+		fi
+		case "$UNAME" in
+		Linux)
+			echo "The runtime is packaged apart from the compiler; on" >&2
+			echo "Debian and Ubuntu it is libclang-rt-dev." >&2
+			;;
+		Darwin)
+			echo "Apple's clang does not ship libFuzzer at all:" >&2
+			echo "brew install llvm." >&2
+			;;
+		esac
+		echo "Otherwise set CC to a clang that has it." >&2
 		exit 1
 	fi
 fi
@@ -84,7 +106,7 @@ INCS="-I $NGX_OBJS \
 #
 # See auto/os/linux, which passes both. Darwin declares the struct
 # unconditionally and needs neither, which is why this only bites on CI.
-case "$(uname -s)" in
+case "$UNAME" in
 Linux) PLATFORM_DEFS="-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64" ;;
 *) PLATFORM_DEFS="" ;;
 esac
