@@ -440,6 +440,7 @@ ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
     if (!resend) {
         ctx->output = NGX_HTTP_BROTLI_OUTPUT_BUSY;
     }
+
     if (ngx_buf_size(ctx->out_buf) == 0) {
         ctx->output = NGX_HTTP_BROTLI_OUTPUT_IDLE;
     }
@@ -646,9 +647,11 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
         } else if (ctx->in->buf->flush) {
             ctx->flush_pending = 1;
         }
+
         link = ctx->in;
         ctx->in = ctx->in->next;
         ngx_free_chain(r->pool, link);
+
         return NGX_HTTP_BROTLI_STEP_CONTINUE;
     }
 
@@ -680,6 +683,7 @@ ngx_http_brotli_filter_pending_input(ngx_chain_t *in,
         if (in->buf->last_buf) {
             *complete = 1;
         }
+
         if (in->buf->flush) {
             *urgent = 1;
         }
@@ -797,6 +801,7 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx,
                and starts the encoding. */
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                 "brotli deferring encoder: pending:%uz", pending);
+
             *rc = NGX_OK;
             return NGX_HTTP_BROTLI_PRE_DEFER;
         }
@@ -847,6 +852,7 @@ ngx_http_brotli_filter_ensure_stream_initialized(
     if (cln == NULL) {
         return NGX_ERROR;
     }
+
     cln->handler = ngx_http_brotli_filter_cleanup;
     cln->data = ctx;
 
@@ -881,12 +887,13 @@ ngx_http_brotli_filter_ensure_stream_initialized(
     if (ctx->out_buf == NULL) {
         return NGX_ERROR;
     }
-    ctx->out_buf->temporary = 1;
 
+    ctx->out_buf->temporary = 1;
     ctx->out_chain = ngx_alloc_chain_link(r->pool);
     if (ctx->out_chain == NULL) {
         return NGX_ERROR;
     }
+
     ctx->out_chain->buf = ctx->out_buf;
     ctx->out_chain->next = NULL;
 
@@ -982,8 +989,8 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         }
     }
 
-    /* Unreachable: the switch above either returns or goes round
-     * again. */
+    /* Unreachable: the switch above either returns
+       or goes round again. */
 }
 
 /* The encoder allocates from the heap, not from the request pool.
@@ -1044,6 +1051,7 @@ ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t *ctx)
         BrotliEncoderDestroyInstance(ctx->encoder);
         ctx->encoder = NULL;
     }
+
     if (ctx->out_chain) {
         /* Worth doing: ngx_free_chain returns the link to the pool's
            chain free list, where ngx_alloc_chain_link will pick it up
@@ -1172,6 +1180,5 @@ ngx_http_brotli_parse_wbits(ngx_conf_t *cf, void *post, void *data)
     }
 
     return "must be 1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k, 256k, 512k, "
-           "1m, 2m, "
-           "4m, 8m or 16m";
+           "1m, 2m, 4m, 8m or 16m";
 }

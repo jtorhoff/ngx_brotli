@@ -10,10 +10,12 @@
 
 #include "../common/ngx_http_brotli_headers.h"
 
-#define NGX_HTTP_BROTLI_STATIC_OFF 0
-#define NGX_HTTP_BROTLI_STATIC_ON 1
-#define NGX_HTTP_BROTLI_STATIC_ALWAYS 2
 
+enum {
+    NGX_HTTP_BROTLI_STATIC_OFF = 0,
+    NGX_HTTP_BROTLI_STATIC_ON,
+    NGX_HTTP_BROTLI_STATIC_ALWAYS
+};
 
 typedef struct {
     ngx_uint_t enable;
@@ -248,6 +250,7 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     buf->file->name = path;
     buf->file->log = log;
     buf->file->directio = file_info.is_directio;
+
     out.buf = buf;
     out.next = NULL;
 

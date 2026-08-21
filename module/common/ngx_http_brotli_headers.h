@@ -26,6 +26,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+
 /* Optional whitespace, as RFC 9110 defines it for list separators. */
 static ngx_uint_t
 ngx_http_brotli_is_whitespace(u_char c)
@@ -139,7 +140,6 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
         }
 
         cursor = start;
-
         for (;;) {
             /* Bounded search, so a header without a terminating NUL
                can not be run off the end of. */
@@ -158,6 +158,7 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
             } else {
                 before = cursor[-1];
             }
+
             cursor += token_len;
             if (cursor == end) {
                 after = ',';
@@ -169,6 +170,7 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
                 !ngx_http_brotli_is_whitespace(before)) {
                 continue;
             }
+
             if (after != ',' && after != ';' &&
                 !ngx_http_brotli_is_whitespace(after)) {
                 continue;
@@ -204,12 +206,15 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     if (r != r->main) {
         return NGX_DECLINED;
     }
+
     if (r->http_version < NGX_HTTP_VERSION_11) {
         return NGX_DECLINED;
     }
+
     if (ngx_http_brotli_check_accept_encoding(r) != NGX_OK) {
         return NGX_DECLINED;
     }
+
     return NGX_OK;
 }
 
@@ -262,6 +267,7 @@ ngx_http_brotli_set_vary(ngx_http_request_t *r)
             if (part->next == NULL) {
                 break;
             }
+
             part = part->next;
             header = part->elts;
             i = 0;
