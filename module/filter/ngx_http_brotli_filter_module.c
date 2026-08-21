@@ -337,7 +337,11 @@ ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
     ctx->headers_postponed = 0;
 
     if (!compress) {
-        ctx->closed = 1;
+        /* Nothing has been allocated yet on this path - headers are only
+           postponed while the encoder does not exist - so this closes an
+           empty instance. Going through close anyway keeps it the only thing
+           that sets ctx->closed, so the flag cannot mean two things. */
+        ngx_http_brotli_filter_close(ctx);
         r->gzip_tested = 0;
         r->gzip_ok = 0;
         return ngx_http_next_header_filter(r);
