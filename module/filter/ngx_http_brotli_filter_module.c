@@ -123,8 +123,17 @@ typedef struct {
     /* 1 if compression is finished / failed. */
     unsigned closed : 1;
 
+    /* 1 once a buffer marked last_buf has been handed to the encoder. Never
+       cleared: input cannot resume. Read to choose FINISH over FLUSH when
+       draining, and to know the stream may be closed once the encoder says it
+       is finished. */
     unsigned end_of_input : 1;
-    unsigned end_of_block : 1;
+    /* 1 when a block has been closed and the next buffer taken from the
+       encoder must carry the flush marker, so the filters below push it out
+       instead of holding it for more. Despite sitting beside end_of_input
+       this is an instruction rather than a state: take_output clears it as
+       soon as it has acted on it. */
+    unsigned flush_pending : 1;
     /* 1 if input has been handed to the encoder that it has not been asked
        to emit yet. BROTLI_OPERATION_PROCESS holds such data back until a
        block fills, so it has to be flushed explicitly when the caller wants
@@ -448,12 +457,12 @@ ngx_http_brotli_filter_take_output(ngx_http_brotli_ctx_t *ctx)
     if (ctx->end_of_input && BrotliEncoderIsFinished(ctx->encoder)) {
         ctx->out_buf->last_buf = 1;
         r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
-    } else if (ctx->end_of_block) {
+    } else if (ctx->flush_pending) {
         ctx->out_buf->flush = 1;
         r->connection->buffered &= ~NGX_HTTP_BROTLI_BUFFERED;
     }
 
-    ctx->end_of_block = 0;
+    ctx->flush_pending = 0;
     ctx->output = NGX_HTTP_BROTLI_OUTPUT_READY;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -535,7 +544,7 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
             ctx->unflushed_input = 0;
             /* Mark the resulting buffer so the filters below push it out
                rather than holding it for more. */
-            ctx->end_of_block = 1;
+            ctx->flush_pending = 1;
             return ngx_http_brotli_filter_drain_encoder(ctx);
         }
         return NGX_HTTP_BROTLI_STEP_DONE;
@@ -586,7 +595,7 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
         if (ctx->in->buf->last_buf) {
             ctx->end_of_input = 1;
         } else if (ctx->in->buf->flush) {
-            ctx->end_of_block = 1;
+            ctx->flush_pending = 1;
         }
         link = ctx->in;
         ctx->in = ctx->in->next;
