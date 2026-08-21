@@ -316,7 +316,12 @@ ngx_http_brotli_header_filter(ngx_http_request_t *r)
         return ngx_http_next_header_filter(r);
     }
 
-    r->gzip_vary = 1;
+    /* Before the Accept-Encoding test, not after: the response varies whether
+       or not this particular client is served Brotli, and a cache that only
+       heard about it from the clients that were is no use. */
+    if (ngx_http_brotli_set_vary(r) != NGX_OK) {
+        return NGX_ERROR;
+    }
 
     /* Check if client support brotli encoding. */
     if (ngx_http_brotli_claim_request(r) != NGX_OK) {
