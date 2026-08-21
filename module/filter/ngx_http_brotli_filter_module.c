@@ -83,14 +83,27 @@ typedef enum {
    settled the decisions that come before the encoder. This is deliberately
    not an ngx_int_t: the alternative was a sentinel return code, which would
    have had to be a value no filter below could ever hand back, and nothing
-   but a comment would have kept that true. */
+   but a comment would have kept that true.
+
+   The caller treats DEFER and REJECT alike - both end the call and return
+   "rc" - so they are separate for the reader rather than for the control
+   flow. "Not yet" and "no" answer different questions, and the response may
+   still be compressed after a DEFER. */
 typedef enum {
-    /* The call is accepted for encoding: nothing left to settle, so carry on
-       into the encoder loop. */
+    /* Accepted for encoding: nothing left to settle, so carry on into the
+       encoder loop. The only outcome that does not write "rc", because it is
+       the only one where the body filter does not return straight away. */
     NGX_HTTP_BROTLI_ACCEPT = 0,
-    /* The call is not encoded here - the response is being passed through, or
-       there is not yet enough of it to judge. Either way this call is over and
-       the body filter returns what prepare stored in "rc". */
+    /* Not yet: too little of the body has arrived to answer the question
+       brotli_min_length asks, or its size is still unknown and worth waiting
+       a moment to learn before the encoder window is fixed. The input stays
+       in ctx->in and a later call decides, so this may still end in
+       compression. "rc" is NGX_OK - nothing has gone wrong. */
+    NGX_HTTP_BROTLI_DEFER,
+    /* Settled, and not encoded here: the response is passing through
+       uncompressed, the header filter failed, or a special response was
+       substituted below us. "rc" holds what the body filter should return,
+       which is a different value in each of those cases. */
     NGX_HTTP_BROTLI_REJECT
 } ngx_http_brotli_prepare_e;
 
@@ -618,11 +631,12 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
    before the steady state, and both are answered from one walk of the input
    chain.
 
-   Returns NGX_HTTP_BROTLI_ACCEPT when there is nothing left to settle
-   and the caller should carry on into the encoder loop. Otherwise the body
-   filter is done for this call and "*rc" holds what it should return -
-   including the pass-through case, where this has already handed the held
-   input to the next filter. */
+   Returns NGX_HTTP_BROTLI_ACCEPT when there is nothing left to settle and the
+   caller should carry on into the encoder loop. DEFER and REJECT both end the
+   call with "*rc" holding what the body filter should return, and differ in
+   whether the response may still be compressed later - including, under
+   REJECT, the pass-through case, where this has already handed the held input
+   to the next filter. */
 static ngx_http_brotli_prepare_e
 ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
 {
@@ -635,12 +649,10 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
     ngx_uint_t              compress;
     ngx_chain_t            *link;
 
-    /* Never read unless REJECT is reported, but left defined either way. */
-    *rc = NGX_OK;
-
     /* The steady state: the headers are away and the encoder exists, so there
        is nothing to settle and the input chain need not be walked at all. */
     if (!ctx->headers_postponed && ctx->initialized) {
+        /* Continue with compression, rc is ignored downstream. */
         return NGX_HTTP_BROTLI_ACCEPT;
     }
 
@@ -666,7 +678,8 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
             compress = 1;
         } else {
             /* Too little to judge, and nothing waiting on it. */
-            return NGX_HTTP_BROTLI_REJECT;
+            *rc = NGX_OK;
+            return NGX_HTTP_BROTLI_DEFER;
         }
 
         header_rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
@@ -713,10 +726,12 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
                these bytes, stops the holding and starts the encoding. */
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                 "brotli deferring encoder: pending:%uz", pending);
-            return NGX_HTTP_BROTLI_REJECT;
+            *rc = NGX_OK;
+            return NGX_HTTP_BROTLI_DEFER;
         }
     }
 
+    /* Continue with compression, rc is ignored downstream. */
     return NGX_HTTP_BROTLI_ACCEPT;
 }
 
