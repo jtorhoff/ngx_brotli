@@ -128,6 +128,11 @@ typedef struct {
        length is unknown, so that brotli_min_length can be applied once enough
        of the body has been seen to judge it. */
     unsigned headers_postponed : 1;
+    /* 1 if this response is to be compressed. Decided before the headers are
+       committed, because it is what they say; send_headers reads it rather
+       than taking it as an argument, so that the answer lives in one place
+       for as long as the request does. */
+    unsigned compressing : 1;
 
     /* 1 if encoder is initialized, output chain and buffer are allocated. */
     unsigned initialized : 1;
@@ -174,8 +179,8 @@ static void *ngx_http_brotli_filter_alloc(void *opaque, size_t size);
 static void ngx_http_brotli_filter_free(void *opaque, void *address);
 static void ngx_http_brotli_filter_cleanup(void *data);
 
-static ngx_int_t ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t *ctx, ngx_uint_t compress);
+static ngx_int_t ngx_http_brotli_filter_send_headers(
+    ngx_http_brotli_ctx_t *ctx);
 
 static void *ngx_http_brotli_create_conf(ngx_conf_t *cf);
 static char *ngx_http_brotli_merge_conf(ngx_conf_t *cf, void *parent,
@@ -343,20 +348,24 @@ ngx_http_brotli_header_filter(ngx_http_request_t *r)
         return NGX_OK;
     }
 
-    return ngx_http_brotli_filter_send_headers(r, ctx, 1);
+    ctx->compressing = 1;
+
+    return ngx_http_brotli_filter_send_headers(ctx);
 }
 
 /* Commits headers that ngx_http_brotli_header_filter held back. With
-   "compress" set the response is labelled and the encoder will run; without
+   ctx->compressing the response is labelled and the encoder will run; without
    it the response passes through untouched, and gzip - suppressed earlier so
-   that Brotli would win - is allowed to reconsider. */
+   that Brotli would win - is allowed to reconsider. The caller sets that flag
+   before calling, since it is the decision these headers announce. */
 static ngx_int_t
-ngx_http_brotli_filter_send_headers(ngx_http_request_t *r,
-    ngx_http_brotli_ctx_t *ctx, ngx_uint_t compress)
+ngx_http_brotli_filter_send_headers(ngx_http_brotli_ctx_t *ctx)
 {
+    ngx_http_request_t *r = ctx->request;
+
     ctx->headers_postponed = 0;
 
-    if (!compress) {
+    if (!ctx->compressing) {
         /* Nothing has been allocated yet on this path - headers are only
            postponed while the encoder does not exist - so this closes an
            empty instance. Going through close anyway keeps it the only thing
@@ -644,7 +653,6 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
     size_t                  pending;
     ngx_uint_t              complete;
     ngx_uint_t              urgent;
-    ngx_uint_t              compress;
     ngx_chain_t            *link;
 
     /* The steady state: the headers are away and the encoder exists, so there
@@ -671,16 +679,16 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
 
         if (complete) {
             /* Whole response in hand, so the comparison is exact. */
-            compress = (pending >= (size_t) conf->min_length);
+            ctx->compressing = (pending >= (size_t) conf->min_length);
         } else if (urgent || pending >= (size_t) conf->min_length) {
-            compress = 1;
+            ctx->compressing = 1;
         } else {
             /* Too little to judge, and nothing waiting on it. */
             *rc = NGX_OK;
             return NGX_HTTP_BROTLI_DEFER;
         }
 
-        header_rc = ngx_http_brotli_filter_send_headers(r, ctx, compress);
+        header_rc = ngx_http_brotli_filter_send_headers(ctx);
         if (header_rc == NGX_ERROR) {
             ngx_http_brotli_filter_close(ctx);
             *rc = NGX_ERROR;
@@ -694,7 +702,7 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
             return NGX_HTTP_BROTLI_REJECT;
         }
 
-        if (!compress) {
+        if (!ctx->compressing) {
             /* Pass the held input through untouched; ctx->closed makes every
                later call a straight hand-off. */
             link = ctx->in;
