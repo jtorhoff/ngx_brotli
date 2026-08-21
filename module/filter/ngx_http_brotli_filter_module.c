@@ -4,17 +4,20 @@
  * Copyright (C) Google Inc.
  */
 
+/* ngx_config.h has to come first, and not only by convention: on
+   Linux it reaches ngx_linux_config.h, which defines _GNU_SOURCE and
+   _FILE_OFFSET_BITS. Those are not on the compiler command line, so
+   any header that pulls in glibc's features.h ahead of it - and
+   brotli/encode.h does, through stddef.h - latches the feature set
+   without them. struct in6_pktinfo then stays hidden and
+   ngx_event_udp.h will not compile. */
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#include "../common/ngx_http_brotli_headers.h"
-
-#if (NGX_HAVE_BROTLI_ENC_ENCODE_H)
-#include <brotli/enc/encode.h>
-#else
 #include <brotli/encode.h>
-#endif
+
+#include "../common/ngx_http_brotli_headers.h"
 
 /* Brotli and GZip modules never stack, i.e. when one of them sets
    "Content-Encoding" the other becomes a pass-through filter.
