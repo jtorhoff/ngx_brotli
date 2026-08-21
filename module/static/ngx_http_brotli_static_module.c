@@ -14,6 +14,7 @@
 #define NGX_HTTP_BROTLI_STATIC_ON 1
 #define NGX_HTTP_BROTLI_STATIC_ALWAYS 2
 
+
 typedef struct {
     ngx_uint_t enable;
 } ngx_http_brotli_static_conf_t;
@@ -41,14 +42,14 @@ static ngx_command_t ngx_http_brotli_static_commands[] = {
     ngx_null_command};
 
 static ngx_http_module_t ngx_http_brotli_static_module_ctx = {
-    NULL,                        /* preconfiguration */
-    ngx_http_brotli_static_init, /* postconfiguration */
+    NULL,                               /* preconfiguration */
+    ngx_http_brotli_static_init,        /* postconfiguration */
 
-    NULL, /* create main conf */
-    NULL, /* init main conf */
+    NULL,                               /* create main conf */
+    NULL,                               /* init main conf */
 
-    NULL, /* create server conf */
-    NULL, /* merge server conf */
+    NULL,                               /* create server conf */
+    NULL,                               /* merge server conf */
 
     ngx_http_brotli_static_create_conf, /* create location conf */
     ngx_http_brotli_static_merge_conf   /* merge location conf */
@@ -126,6 +127,7 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     if (last == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
     last = ngx_cpystrn(last, (u_char *) ".br", sizeof(".br"));
     path.len = last - path.data;
 
@@ -137,12 +139,14 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     core_loc_cfg =
         ngx_http_get_module_loc_conf(r, ngx_http_core_module);
     ngx_memzero(&file_info, sizeof(ngx_open_file_info_t));
+
     file_info.read_ahead = core_loc_cfg->read_ahead;
     file_info.directio = core_loc_cfg->directio;
     file_info.valid = core_loc_cfg->open_file_cache_valid;
     file_info.min_uses = core_loc_cfg->open_file_cache_min_uses;
     file_info.errors = core_loc_cfg->open_file_cache_errors;
     file_info.events = core_loc_cfg->open_file_cache_events;
+
     rc = ngx_http_set_disable_symlinks(r, core_loc_cfg, &path,
         &file_info);
     if (rc != NGX_OK) {
@@ -174,8 +178,10 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
                 level = NGX_LOG_CRIT;
                 break;
         }
+
         ngx_log_error(level, log, file_info.err, "%s \"%s\" failed",
             file_info.failed, path.data);
+
         return NGX_DECLINED;
     }
 
@@ -202,13 +208,16 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
         return rc;
     }
     log->action = "sending response to client";
+
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = file_info.size;
     r->headers_out.last_modified_time = file_info.mtime;
+
     rc = ngx_http_set_etag(r);
     if (rc != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
     rc = ngx_http_set_content_type(r);
     if (rc != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -224,10 +233,12 @@ ngx_http_brotli_static_handler(ngx_http_request_t *r)
     if (buf == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
     buf->file = ngx_pcalloc(r->pool, sizeof(ngx_file_t));
     if (buf->file == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
+
     buf->file_pos = 0;
     buf->file_last = file_info.size;
     buf->in_file = buf->file_last ? 1 : 0;

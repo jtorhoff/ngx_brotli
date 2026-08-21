@@ -39,6 +39,11 @@ AlignConsecutiveDeclarations:
   # into a column, which nginx does not.
   AlignFunctionDeclarations: false
   AlignFunctionPointers:     false
+AlignTrailingComments:
+  Kind:           Always
+  # Blank lines separate the slots of a module context by kind, not
+  # into unrelated groups, so keep one column across them.
+  OverEmptyLines: 1
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortFunctionsOnASingleLine: None

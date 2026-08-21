@@ -250,11 +250,11 @@ static ngx_http_module_t ngx_http_brotli_filter_module_ctx = {
     NULL,                        /* pre-configuration */
     ngx_http_brotli_filter_init, /* post-configuration */
 
-    NULL, /* create main configuration */
-    NULL, /* init main configuration */
+    NULL,                        /* create main configuration */
+    NULL,                        /* init main configuration */
 
-    NULL, /* create server configuration */
-    NULL, /* merge server configuration */
+    NULL,                        /* create server configuration */
+    NULL,                        /* merge server configuration */
 
     ngx_http_brotli_create_conf, /* create location configuration */
     ngx_http_brotli_merge_conf   /* merge location configuration */
