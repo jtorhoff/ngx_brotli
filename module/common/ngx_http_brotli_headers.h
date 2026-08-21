@@ -28,7 +28,7 @@
 
 /* Optional whitespace, as RFC 9110 defines it for list separators. */
 static ngx_uint_t
-ngx_http_brotli_is_optional_whitespace(u_char c)
+ngx_http_brotli_is_whitespace(u_char c)
 {
     return c == ' ' || c == '\t';
 }
@@ -36,8 +36,7 @@ ngx_http_brotli_is_optional_whitespace(u_char c)
 static u_char *
 ngx_http_brotli_skip_whitespace(u_char *cursor, u_char *end)
 {
-    while (cursor < end &&
-           ngx_http_brotli_is_optional_whitespace(*cursor)) {
+    while (cursor < end && ngx_http_brotli_is_whitespace(*cursor)) {
         cursor++;
     }
     return cursor;
@@ -167,11 +166,11 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
             }
 
             if (before != ',' &&
-                !ngx_http_brotli_is_optional_whitespace(before)) {
+                !ngx_http_brotli_is_whitespace(before)) {
                 continue;
             }
             if (after != ',' && after != ';' &&
-                !ngx_http_brotli_is_optional_whitespace(after)) {
+                !ngx_http_brotli_is_whitespace(after)) {
                 continue;
             }
 
