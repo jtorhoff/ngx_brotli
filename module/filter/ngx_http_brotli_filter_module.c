@@ -169,11 +169,7 @@ typedef struct {
 /* Forward declarations. What each of these does is documented at its
    definition, not here, so that the explanation is where the code is. */
 
-static ngx_int_t ngx_http_brotli_filter_ensure_stream_initialized(
-    ngx_http_brotli_ctx_t *ctx);
 static void ngx_http_brotli_filter_close(ngx_http_brotli_ctx_t *ctx);
-static size_t ngx_http_brotli_filter_pending_input(ngx_chain_t *in,
-    ngx_uint_t *complete, ngx_uint_t *urgent);
 
 static void *ngx_http_brotli_filter_alloc(void *opaque, size_t size);
 static void ngx_http_brotli_filter_free(void *opaque, void *address);
@@ -632,6 +628,31 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
     return NGX_HTTP_BROTLI_STEP_CONTINUE;
 }
 
+/* Totals the unconsumed input, reporting whether the chain closes the
+   response ("complete") and whether anything in it demands to be pushed out
+   now ("urgent"). */
+static size_t
+ngx_http_brotli_filter_pending_input(ngx_chain_t *in, ngx_uint_t *complete,
+    ngx_uint_t *urgent)
+{
+    size_t total = 0;
+
+    *complete = 0;
+    *urgent = 0;
+
+    for (; in; in = in->next) {
+        total += ngx_buf_size(in->buf);
+        if (in->buf->last_buf) {
+            *complete = 1;
+        }
+        if (in->buf->flush) {
+            *urgent = 1;
+        }
+    }
+
+    return total;
+}
+
 /* Everything that has to be settled before the encoder can run: committing
    headers the header filter held back, and deciding whether to go on holding
    input while the response size is still unknown. Both questions only arise
@@ -741,108 +762,6 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx, ngx_int_t *rc)
     return NGX_HTTP_BROTLI_ACCEPT;
 }
 
-/* Response body filtration (compression). */
-static ngx_int_t
-ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
-{
-    ngx_int_t              rc;
-    ngx_http_brotli_ctx_t *ctx;
-    ngx_http_brotli_step_e step;
-
-    ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-        "http brotli filter");
-
-    if (ctx == NULL || ctx->closed || r->header_only) {
-        return ngx_http_next_body_filter(r, in);
-    }
-
-    /* Recorded before "in" is folded into ctx->in, which is what makes the two
-       distinguishable further down: ctx->in running dry says the filter has
-       nothing left to compress, this says the caller brought nothing new. */
-    ctx->caller_wants_output = (in == NULL);
-
-    /* If more input is provided - append it to our input chain. */
-    if (in) {
-        if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
-            ngx_http_brotli_filter_close(ctx);
-            return NGX_ERROR;
-        }
-        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
-    }
-
-    if (ngx_http_brotli_filter_prepare(ctx, &rc) != NGX_HTTP_BROTLI_ACCEPT) {
-        return rc;
-    }
-
-    if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) != NGX_OK) {
-        ngx_http_brotli_filter_close(ctx);
-        return NGX_ERROR;
-    }
-
-    /* Main loop, one phase per turn:
-       - output still outstanding - push it down, and do not touch the encoder
-         until it has all been consumed
-       - encoder has output - wrap it
-       - otherwise - advance the encoder: finish, flush, or feed it input
-
-       Each phase returns what to do next rather than returning from here
-       itself, so the four ways out of this filter are all written once, in the
-       switch below. */
-    for (;;) {
-        if (ctx->output != NGX_HTTP_BROTLI_OUTPUT_IDLE) {
-            step = ngx_http_brotli_filter_send_output(ctx);
-        } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
-            step = ngx_http_brotli_filter_take_output(ctx);
-        } else {
-            step = ngx_http_brotli_filter_feed_encoder(ctx);
-        }
-
-        switch (step) {
-            case NGX_HTTP_BROTLI_STEP_CONTINUE:
-                break;
-
-            case NGX_HTTP_BROTLI_STEP_DONE:
-                return NGX_OK;
-
-            case NGX_HTTP_BROTLI_STEP_AGAIN:
-                return NGX_AGAIN;
-
-            default:
-                ngx_http_brotli_filter_close(ctx);
-                return NGX_ERROR;
-        }
-    }
-
-    /* Unreachable: the switch above either returns or goes round again. */
-}
-
-/* Totals the unconsumed input, reporting whether the chain closes the
-   response ("complete") and whether anything in it demands to be pushed out
-   now ("urgent"). */
-static size_t
-ngx_http_brotli_filter_pending_input(ngx_chain_t *in, ngx_uint_t *complete,
-    ngx_uint_t *urgent)
-{
-    size_t total = 0;
-
-    *complete = 0;
-    *urgent = 0;
-
-    for (; in; in = in->next) {
-        total += ngx_buf_size(in->buf);
-        if (in->buf->last_buf) {
-            *complete = 1;
-        }
-        if (in->buf->flush) {
-            *urgent = 1;
-        }
-    }
-
-    return total;
-}
-
 /* Initializes encoder, output chain and buffer, if necessary. Returns NGX_OK
    if encoder is successfully initialized (have been already initialized),
    and requires objects are allocated. Returns NGX_ERROR otherwise. */
@@ -932,6 +851,83 @@ ngx_http_brotli_filter_ensure_stream_initialized(ngx_http_brotli_ctx_t *ctx)
         (1 << wbits));
 
     return NGX_OK;
+}
+
+/* Response body filtration (compression). */
+static ngx_int_t
+ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
+{
+    ngx_int_t              rc;
+    ngx_http_brotli_ctx_t *ctx;
+    ngx_http_brotli_step_e step;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_brotli_filter_module);
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+        "http brotli filter");
+
+    if (ctx == NULL || ctx->closed || r->header_only) {
+        return ngx_http_next_body_filter(r, in);
+    }
+
+    /* Recorded before "in" is folded into ctx->in, which is what makes the two
+       distinguishable further down: ctx->in running dry says the filter has
+       nothing left to compress, this says the caller brought nothing new. */
+    ctx->caller_wants_output = (in == NULL);
+
+    /* If more input is provided - append it to our input chain. */
+    if (in) {
+        if (ngx_chain_add_copy(r->pool, &ctx->in, in) != NGX_OK) {
+            ngx_http_brotli_filter_close(ctx);
+            return NGX_ERROR;
+        }
+        r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
+    }
+
+    if (ngx_http_brotli_filter_prepare(ctx, &rc) != NGX_HTTP_BROTLI_ACCEPT) {
+        return rc;
+    }
+
+    if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) != NGX_OK) {
+        ngx_http_brotli_filter_close(ctx);
+        return NGX_ERROR;
+    }
+
+    /* Main loop, one phase per turn:
+       - output still outstanding - push it down, and do not touch the encoder
+         until it has all been consumed
+       - encoder has output - wrap it
+       - otherwise - advance the encoder: finish, flush, or feed it input
+
+       Each phase returns what to do next rather than returning from here
+       itself, so the four ways out of this filter are all written once, in the
+       switch below. */
+    for (;;) {
+        if (ctx->output != NGX_HTTP_BROTLI_OUTPUT_IDLE) {
+            step = ngx_http_brotli_filter_send_output(ctx);
+        } else if (BrotliEncoderHasMoreOutput(ctx->encoder)) {
+            step = ngx_http_brotli_filter_take_output(ctx);
+        } else {
+            step = ngx_http_brotli_filter_feed_encoder(ctx);
+        }
+
+        switch (step) {
+            case NGX_HTTP_BROTLI_STEP_CONTINUE:
+                break;
+
+            case NGX_HTTP_BROTLI_STEP_DONE:
+                return NGX_OK;
+
+            case NGX_HTTP_BROTLI_STEP_AGAIN:
+                return NGX_AGAIN;
+
+            default:
+                ngx_http_brotli_filter_close(ctx);
+                return NGX_ERROR;
+        }
+    }
+
+    /* Unreachable: the switch above either returns or goes round again. */
 }
 
 /* The encoder allocates from the heap, not from the request pool. Brotli makes
