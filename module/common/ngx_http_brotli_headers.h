@@ -27,8 +27,11 @@
 #include <ngx_http.h>
 
 /* Optional whitespace, as RFC 9110 defines it for list separators. */
-#define ngx_http_brotli_is_optional_whitespace(c)                    \
-    ((c) == ' ' || (c) == '\t')
+static ngx_uint_t
+ngx_http_brotli_is_optional_whitespace(u_char c)
+{
+    return c == ' ' || c == '\t';
+}
 
 static u_char *
 ngx_http_brotli_skip_whitespace(u_char *cursor, u_char *end)
