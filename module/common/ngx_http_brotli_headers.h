@@ -92,8 +92,7 @@ ngx_http_brotli_is_zero_weighted(u_char *cursor, u_char *end)
    RFC 9110 defines as "not acceptable". A wildcard ("*") is taken on the
    same terms, since RFC 9110 says it covers any coding not explicitly
    listed. Relative weights are deliberately ignored, so "gzip;q=1.0,
-   br;q=0.1" still selects Brotli. Choosing Brotli then suppresses gzip for
-   the request, in ngx_http_brotli_claim_request. */
+   br;q=0.1" still selects Brotli. */
 static ngx_int_t
 ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
 {
@@ -175,18 +174,19 @@ ngx_http_brotli_check_accept_encoding(ngx_http_request_t *r)
     return NGX_DECLINED;
 }
 
-/* Decides whether this request should be served Brotli at all, and claims it
-   if so. Shared by both modules, which had identical copies of this.
+/* Decides whether this request should be served Brotli at all. Shared by both
+   modules, which had identical copies of this.
 
    Returns NGX_OK only for a main request from a client that named "br" and
-   speaks at least HTTP/1.1. The version test mirrors gzip_http_version, whose
-   default is also 1.1: some HTTP/1.0 clients and intermediaries mishandle a
-   compressed response, and gzip has always declined them.
+   speaks at least HTTP/1.1. The 1.1 floor matches gzip_http_version's default
+   for the same reason it has one: some HTTP/1.0 clients and intermediaries
+   mishandle a compressed response.
 
-   Claiming the request means suppressing gzip for it, so that a client
-   advertising both gets Brotli. That happens only once every test has passed:
-   when Brotli declines, gzip is left free to make its own decision, including
-   applying its own version and proxy rules. */
+   Nothing here touches gzip. Where both modules could compress a response,
+   the one whose header filter runs first sets "Content-Encoding" and the
+   other declines on seeing it - which is Brotli, since its filter is ordered
+   ahead of gzip's. Reaching into r->gzip_tested and r->gzip_ok to force that
+   outcome only restated an order the filter chain already fixes. */
 static ngx_int_t
 ngx_http_brotli_claim_request(ngx_http_request_t *r)
 {
@@ -199,8 +199,6 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     if (ngx_http_brotli_check_accept_encoding(r) != NGX_OK) {
         return NGX_DECLINED;
     }
-    r->gzip_tested = 1;
-    r->gzip_ok = 0;
     return NGX_OK;
 }
 

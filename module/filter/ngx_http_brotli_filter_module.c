@@ -356,9 +356,10 @@ ngx_http_brotli_header_filter(ngx_http_request_t *r)
 
 /* Commits headers that ngx_http_brotli_header_filter held back. With
    ctx->compressing the response is labelled and the encoder will run; without
-   it the response passes through untouched, and gzip - suppressed earlier so
-   that Brotli would win - is allowed to reconsider. The caller sets that flag
-   before calling, since it is the decision these headers announce. */
+   it the response passes through untouched, leaving no "Content-Encoding" for
+   the filters below to defer to, so gzip may still take it. The caller sets
+   that flag before calling, since it is the decision these headers
+   announce. */
 static ngx_int_t
 ngx_http_brotli_filter_send_headers(ngx_http_brotli_ctx_t *ctx)
 {
@@ -372,8 +373,6 @@ ngx_http_brotli_filter_send_headers(ngx_http_brotli_ctx_t *ctx)
            empty instance. Going through close anyway keeps it the only thing
            that sets ctx->closed, so the flag cannot mean two things. */
         ngx_http_brotli_filter_close(ctx);
-        r->gzip_tested = 0;
-        r->gzip_ok = 0;
         return ngx_http_next_header_filter(r);
     }
 
