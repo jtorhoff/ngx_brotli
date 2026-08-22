@@ -340,7 +340,7 @@ ngx_http_brotli_header_filter(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    /* Check if client support brotli encoding. */
+    /* Check if client supports brotli encoding. */
     if (ngx_http_brotli_claim_request(r) != NGX_OK) {
         return ngx_http_next_header_filter(r);
     }
@@ -455,6 +455,7 @@ ngx_http_brotli_filter_send_output(ngx_http_brotli_ctx_t *ctx)
             r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
             return NGX_HTTP_BROTLI_STEP_AGAIN;
         }
+
         return NGX_HTTP_BROTLI_STEP_CONTINUE;
     }
 
@@ -595,6 +596,7 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
             ctx->flush_pending = 1;
             return ngx_http_brotli_filter_drain_encoder(ctx);
         }
+
         return NGX_HTTP_BROTLI_STEP_DONE;
     }
 
@@ -611,9 +613,6 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
         return NGX_HTTP_BROTLI_STEP_CONTINUE;
     }
 
-    available_input = input_size;
-    next_input_byte = (const uint8_t *) ctx->in->buf->pos;
-    available_output = 0;
     if (ctx->in->buf->last_buf) {
         operation = BROTLI_OPERATION_FINISH;
     } else if (ctx->in->buf->flush) {
@@ -622,9 +621,14 @@ ngx_http_brotli_filter_feed_encoder(ngx_http_brotli_ctx_t *ctx)
         operation = BROTLI_OPERATION_PROCESS;
     }
 
+    available_input = input_size;
+    next_input_byte = (const uint8_t *) ctx->in->buf->pos;
+    available_output = 0;
+
     ok = BrotliEncoderCompressStream(ctx->encoder, operation,
         &available_input, &next_input_byte, &available_output, NULL,
         NULL);
+
     r->connection->buffered |= NGX_HTTP_BROTLI_BUFFERED;
     if (!ok) {
         return NGX_HTTP_BROTLI_STEP_FAILED;
@@ -816,7 +820,7 @@ ngx_http_brotli_filter_prepare(ngx_http_brotli_ctx_t *ctx,
    initialized), and requires objects are allocated. Returns NGX_ERROR
    otherwise. */
 static ngx_int_t
-ngx_http_brotli_filter_ensure_stream_initialized(
+ngx_http_brotli_filter_ensure_stream_inited(
     ngx_http_brotli_ctx_t *ctx)
 {
     ngx_http_request_t     *r;
@@ -948,8 +952,7 @@ ngx_http_brotli_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         return rc;
     }
 
-    if (ngx_http_brotli_filter_ensure_stream_initialized(ctx) !=
-        NGX_OK) {
+    if (ngx_http_brotli_filter_ensure_stream_inited(ctx) != NGX_OK) {
         ngx_http_brotli_filter_close(ctx);
         return NGX_ERROR;
     }
