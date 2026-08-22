@@ -201,6 +201,29 @@ def port_is_free(port):
 # only thing that can stop these responses being compressed.
 STATUS_BODY = ("<html><body>" + "status guard body " * 40 + "</body></html>").encode()
 
+# Same, for the Vary dedupe cases below.
+VARY_BODY = ("<html><body>" + "vary dedupe body " * 40 + "</body></html>").encode()
+
+# Headers the upstream sends so ngx_http_brotli_check_vary can be reached with
+# something to compare against. The module adds "Vary: Accept-Encoding" itself,
+# so what each case checks is whether it recognises what is already there.
+#
+# "short" and "long" sit one character either side of "Accept-Encoding" and so
+# probe the length guard from both directions. "etag" is the case that matters
+# most: its key is four characters and its value fifteen, exactly like
+# "Vary: Accept-Encoding", so it clears both length guards and only the string
+# comparison can reject it. An inversion of that comparison shipped a response
+# with no Vary at all, and no fixture at the time noticed.
+VARY_CASES = {
+    "ae": ("Vary", "Accept-Encoding"),
+    "mixed": ("Vary", "accept-encoding"),
+    "lang": ("Vary", "Accept-Language"),
+    "short": ("Vary", "Accept-Encodin"),
+    "long": ("Vary", "Accept-Encodings"),
+    "etag": ("ETag", '"0123456789abc"'),
+    "none": None,
+}
+
 WORDS = [
     "brotli",
     "nginx",
@@ -365,6 +388,10 @@ class Upstream:
                 self._status(conn, int(path.rsplit("/", 1)[-1]))
                 return
 
+            if path.startswith("/vary/"):
+                self._vary(conn, path.rsplit("/", 1)[-1])
+                return
+
             conn.sendall(
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: text/html\r\n"
@@ -425,6 +452,23 @@ class Upstream:
                 f"{extra}Content-Length: {len(body)}\r\n\r\n"
             ).encode()
             + body
+        )
+
+    def _vary(self, conn, case):
+        """Replies carrying the header named by VARY_CASES[case], if any.
+
+        Content-Length rather than chunked: what is under test is the header
+        filter's dedupe, and a known length keeps the response out of the
+        deferral path so a failure here can only be about headers.
+        """
+        header = VARY_CASES.get(case)
+        extra = f"{header[0]}: {header[1]}\r\n" if header else ""
+        conn.sendall(
+            (
+                f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                f"{extra}Content-Length: {len(VARY_BODY)}\r\n\r\n"
+            ).encode()
+            + VARY_BODY
         )
 
     def shutdown(self):
@@ -514,6 +558,28 @@ def fetch(port, path, accept_encoding: str | None = "br", method="GET", timeout=
         response = conn.getresponse()
         body = response.read()
         return (response.status, {k.lower(): v for k, v in response.getheaders()}, body)
+    finally:
+        conn.close()
+
+
+def fetch_repeated(port, path, name, accept_encoding="br", timeout=30):
+    """Returns (status, every value sent for `name`, the collapsed headers).
+
+    fetch() folds the headers into a dict, which is exactly wrong here: one
+    "Vary: Accept-Encoding" and two of them collapse to the same entry, and
+    the difference between those is what the dedupe is for.
+    """
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        headers = {"Host": "localhost"}
+        if accept_encoding is not None:
+            headers["Accept-Encoding"] = accept_encoding
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        response.read()
+        pairs = response.getheaders()
+        repeated = [v for k, v in pairs if k.lower() == name.lower()]
+        return (response.status, repeated, {k.lower(): v for k, v in pairs})
     finally:
         conn.close()
 
@@ -779,6 +845,85 @@ def test_static_module_without_sibling(ctx):
         body == ctx.fixtures["plain_only.html"],
         "the fallback did not serve the original file",
     )
+
+
+def check_vary_dedupe(ctx, case, expected):
+    """Fetches /vary/<case> and returns every Vary line it came back with.
+
+    The compression check is not incidental. set_vary runs only on a response
+    the filter accepted, so if these ever stopped being compressed the Vary
+    assertions below would still pass while covering nothing at all.
+    """
+    status, vary, headers = fetch_repeated(ctx.port, f"/vary/{case}", "Vary")
+    check(status == 200, f"/vary/{case}: expected 200, got {status}")
+    check(
+        headers.get("content-encoding") == "br",
+        f"/vary/{case} came back uncompressed, so set_vary never ran and this "
+        f"test proves nothing; headers: {headers!r}",
+    )
+    check(
+        len(vary) == expected,
+        f"/vary/{case}: expected {expected} Vary header(s), got {len(vary)}: "
+        f"{vary!r}",
+    )
+    return vary
+
+
+@test("an upstream Vary: Accept-Encoding is not duplicated")
+def test_vary_not_duplicated(ctx):
+    vary = check_vary_dedupe(ctx, "ae", 1)
+    check(
+        vary[0].lower() == "accept-encoding",
+        f"the surviving Vary was {vary[0]!r}",
+    )
+
+
+@test("an upstream Vary is recognised whatever its case")
+def test_vary_case_insensitive(ctx):
+    check_vary_dedupe(ctx, "mixed", 1)
+
+
+@test("an unrelated Vary is kept and ours added beside it")
+def test_vary_unrelated_kept(ctx):
+    vary = check_vary_dedupe(ctx, "lang", 2)
+    lowered = [v.lower() for v in vary]
+    check(
+        "accept-language" in lowered,
+        f"the upstream's own Vary was dropped: {vary!r}",
+    )
+    check(
+        "accept-encoding" in lowered,
+        f"our Vary was not added: {vary!r}",
+    )
+
+
+@test("a Vary one character short of ours is not treated as a match")
+def test_vary_near_miss_short(ctx):
+    check_vary_dedupe(ctx, "short", 2)
+
+
+@test("a Vary one character long is not treated as a match")
+def test_vary_near_miss_long(ctx):
+    check_vary_dedupe(ctx, "long", 2)
+
+
+@test("a same-shaped header that is not Vary does not suppress ours")
+def test_vary_lookalike_header(ctx):
+    # ETag's key is four characters and this value fifteen, so both length
+    # guards pass and only the string comparison stands between it and a
+    # false match. When that comparison was once inverted, this response
+    # went out with no Vary at all - a cache would then serve the Brotli
+    # body to a client that never asked for one.
+    vary = check_vary_dedupe(ctx, "etag", 1)
+    check(
+        vary[0].lower() == "accept-encoding",
+        f"the Vary that survived was {vary[0]!r}",
+    )
+
+
+@test("a response with no upstream Vary still gets exactly one")
+def test_vary_added_when_absent(ctx):
+    check_vary_dedupe(ctx, "none", 1)
 
 
 @test("real HTML round-trips", needs_decoder=True, needs_corpus=True)
