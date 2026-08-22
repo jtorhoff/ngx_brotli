@@ -226,23 +226,19 @@ ngx_http_brotli_check_vary(ngx_table_elt_t *header)
     static const u_char vary[] = "Vary";
     static const u_char encoding[] = "Accept-Encoding";
 
-    size_t    vary_len;
-    size_t    encoding_len;
-    ngx_str_t key;
-    ngx_str_t val;
+    ngx_str_t *key;
+    ngx_str_t *val;
 
-    vary_len = sizeof(vary) - 1;
-    encoding_len = sizeof(encoding) - 1;
+    key = &header->key;
+    val = &header->value;
 
-    key = header->key;
-    val = header->value;
-
-    if (key.len != vary_len || val.len != encoding_len) {
+    if (key->len != sizeof(vary) - 1 ||
+        val->len != sizeof(encoding) - 1) {
         return NGX_DECLINED;
     }
 
-    if (ngx_strncasecmp(key.data, (u_char *) vary, key.len) ||
-        ngx_strncasecmp(val.data, (u_char *) encoding, val.len)) {
+    if (ngx_strncasecmp(key->data, (u_char *) vary, key->len) ||
+        ngx_strncasecmp(val->data, (u_char *) encoding, val->len)) {
         return NGX_DECLINED;
     }
 
