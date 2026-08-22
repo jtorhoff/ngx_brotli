@@ -1172,7 +1172,10 @@ ngx_http_brotli_parse_wbits(ngx_conf_t *cf, void *post, void *data)
 
     for (bits = BROTLI_MIN_WINDOW_BITS;
         bits <= BROTLI_MAX_WINDOW_BITS; bits++) {
-        wsize = 1u << bits;
+        /* size_t rather than "1u", which would evaluate the shift in
+           32 bits: the ceiling is Brotli's, and a vendored update
+           raising it past 31 would make that undefined. */
+        wsize = (size_t) 1 << bits;
         if (*parameter == wsize) {
             *parameter = bits;
             return NGX_CONF_OK;
