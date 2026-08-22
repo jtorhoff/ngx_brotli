@@ -218,28 +218,25 @@ ngx_http_brotli_claim_request(ngx_http_request_t *r)
     return NGX_OK;
 }
 
+/* Checks whether the given header is "Vary: Accept-Encoding".
+   Returns NGX_OK on a match, NGX_DECLINED otherwise. */
 static ngx_int_t
-ngx_http_brotli_check_vary(u_char *key, size_t key_len, u_char *val,
-    size_t val_len)
+ngx_http_brotli_check_vary(ngx_table_elt_t *header)
 {
     static const u_char vary[] = "Vary";
     static const u_char encoding[] = "Accept-Encoding";
-    size_t              vary_len = sizeof(vary) - 1;
-    size_t              encoding_len = sizeof(encoding) - 1;
+    const size_t        vary_len = sizeof(vary) - 1;
+    const size_t        encoding_len = sizeof(encoding) - 1;
 
-    if (key_len != vary_len) {
+    const ngx_str_t key = header->key;
+    const ngx_str_t val = header->value;
+
+    if (key.len != vary_len || val.len != encoding_len) {
         return NGX_DECLINED;
     }
 
-    if (val_len != encoding_len) {
-        return NGX_DECLINED;
-    }
-
-    if (ngx_strncasecmp(key, (u_char *) vary, key_len) != 0) {
-        return NGX_DECLINED;
-    }
-
-    if (ngx_strncasecmp(val, (u_char *) encoding, val_len) != 0) {
+    if (ngx_strncasecmp(key.data, (u_char *) vary, key.len) ||
+        ngx_strncasecmp(val.data, (u_char *) encoding, val.len)) {
         return NGX_DECLINED;
     }
 
@@ -306,9 +303,7 @@ ngx_http_brotli_set_vary(ngx_http_request_t *r)
             continue;
         }
 
-        if (ngx_http_brotli_check_vary(header[i].key.data,
-                header[i].key.len, header[i].value.data,
-                header[i].value.len) == NGX_OK) {
+        if (ngx_http_brotli_check_vary(&header[i]) == NGX_OK) {
             return NGX_OK;
         }
     }
