@@ -225,11 +225,17 @@ ngx_http_brotli_check_vary(ngx_table_elt_t *header)
 {
     static const u_char vary[] = "Vary";
     static const u_char encoding[] = "Accept-Encoding";
-    const size_t        vary_len = sizeof(vary) - 1;
-    const size_t        encoding_len = sizeof(encoding) - 1;
 
-    const ngx_str_t key = header->key;
-    const ngx_str_t val = header->value;
+    size_t    vary_len;
+    size_t    encoding_len;
+    ngx_str_t key;
+    ngx_str_t val;
+
+    vary_len = sizeof(vary) - 1;
+    encoding_len = sizeof(encoding) - 1;
+
+    key = header->key;
+    val = header->value;
 
     if (key.len != vary_len || val.len != encoding_len) {
         return NGX_DECLINED;
@@ -334,22 +340,22 @@ ngx_http_brotli_set_vary(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_brotli_set_content_encoding(ngx_http_request_t *r)
 {
-    ngx_table_elt_t *content_encoding_entry;
+    ngx_table_elt_t *entry;
 
-    content_encoding_entry = ngx_list_push(&r->headers_out.headers);
-    if (content_encoding_entry == NULL) {
+    entry = ngx_list_push(&r->headers_out.headers);
+    if (entry == NULL) {
         return NGX_ERROR;
     }
 
-    content_encoding_entry->hash = 1;
+    entry->hash = 1;
 #if nginx_version >= 1023000
     /* Since 1.23.0 the headers_out entries are linked, so a pushed
        entry has to terminate its own list. */
-    content_encoding_entry->next = NULL;
+    entry->next = NULL;
 #endif
-    ngx_str_set(&content_encoding_entry->key, "Content-Encoding");
-    ngx_str_set(&content_encoding_entry->value, "br");
-    r->headers_out.content_encoding = content_encoding_entry;
+    ngx_str_set(&entry->key, "Content-Encoding");
+    ngx_str_set(&entry->value, "br");
+    r->headers_out.content_encoding = entry;
 
     return NGX_OK;
 }
